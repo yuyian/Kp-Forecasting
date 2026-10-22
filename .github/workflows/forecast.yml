@@ -2,10 +2,10 @@ name: Kp forecast
 
 on:
   schedule:
-    # Kp bins end at 00, 03, 06, 09, 12, 15, 18 and 21 UTC.
-    # Minute 27 publishes the bin that just ended. Minute 52 runs again
-    # if that first start was delayed or dropped.
-    - cron: "27,52 0,3,6,9,12,15,18,21 * * *"
+    # Once an hour, off the top of the hour. A new 3-hour Kp bin is
+    # published on the next start. A single simple cron is what GitHub
+    # actually registers; the earlier list-style schedule never started.
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:

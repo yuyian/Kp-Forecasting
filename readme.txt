@@ -248,9 +248,8 @@ including coefficients, drivers, and the run log, stay in
 Rcode/Main/output/Main_VARX_Realtime/. The directory other people should
 open is publish/.
 
-GitHub Actions runs the same script every three hours, at minutes 27 and 52
-after each Kp bin end (00, 03, 06, 09, 12, 15, 18, 21 UTC). The second start
-covers a delayed or dropped first start. The laptop can be off.
+GitHub Actions runs the same script every hour at minute 17 UTC. A new Kp
+bin is published on the next start after that bin ends. The laptop can be off.
 The workflow is .github/workflows/forecast.yml. It publishes publish/ with
 GitHub Pages. The page is
 
