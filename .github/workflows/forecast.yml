@@ -1,0 +1,56 @@
+name: Kp forecast
+
+on:
+  schedule:
+    # Kp bins end at 00, 03, 06, 09, 12, 15, 18 and 21 UTC.
+    - cron: "20 0,3,6,9,12,15,18,21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: kp-forecast-pages
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
+          use-public-rspm: true
+
+      - name: Install R packages
+        run: Rscript -e 'install.packages("jsonlite")'
+
+      - name: Run the forecast
+        run: bash Rcode/Main/run_realtime.sh
+
+      - name: Show the run log
+        if: always()
+        run: cat publish/cron.log
+
+      - name: Keep the log off the public site
+        run: rm -f publish/cron.log && rm -rf publish/.run.lock
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: publish
+
+  deploy:
+    needs: forecast
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

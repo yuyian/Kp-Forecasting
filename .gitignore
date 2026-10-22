@@ -1,0 +1,15 @@
+.DS_Store
+.Rhistory
+publish/*
+!publish/index.html
+
+# Minute OMNI and the aggregated copies are not used by the scheduled job.
+Data/Origin/omni-high-resolution-1min/
+Data/Aggregated/
+Data/Processed/OMNI.csv
+
+# Pages and tables are rebuilt by the forecast. Keep the fitted caches.
+Rcode/Main/output/Main_VARX_Realtime/*
+!Rcode/Main/output/Main_VARX_Realtime/VARX_Kp_coef.RData
+!Rcode/Main/output/Main_VARX_Realtime/VARX_Kp_outlook27_coef.RData
+!Rcode/Main/output/Main_VARX_Realtime/VARX_Kp_cycle_library.RData

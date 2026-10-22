@@ -1,0 +1,825 @@
+# =============================================================================
+# Write_VARX_Pages.R
+# HTML for the realtime forecast and the baseline scores.
+# The pages show one model: the 24-hour VARX with a searched 25-29 day lag.
+# In-situ measurements and the AWSoM Earth model are the two solar-wind inputs.
+# Persistence is the reference, not a second forecast model.
+# =============================================================================
+
+fmt_utc = function(x) format(x, "%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+parse_utc = function(x) {
+  x = trimws(as.character(x))
+  date_only = grepl("^\\d{4}-\\d{2}-\\d{2}$", x)
+  x[date_only] = paste0(x[date_only], " 00:00:00")
+  out = as.POSIXct(x, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+  if (anyNA(out)) stop(sprintf("Unparsed timestamps, first: %s", x[which(is.na(out))[1]]))
+  out
+}
+
+html_escape = function(x) {
+  x = as.character(x)
+  x = gsub("&", "&amp;", x, fixed = TRUE)
+  x = gsub("<", "&lt;", x, fixed = TRUE)
+  x = gsub(">", "&gt;", x, fixed = TRUE)
+  x
+}
+fmt_num = function(x, digits) sprintf(paste0("%.", digits, "f"), x)
+
+# Names on the RTSW page: "Earth model against in-situ measurements",
+# and the coloured line is "the realtime AWSoM run".
+lab_meas = "In-situ measurements"
+lab_awso = "AWSoM Earth model"
+lab_boost = "Boosted"
+
+legend_html = function(items) {
+  paste0('<div class="legend">', paste(vapply(seq_along(items), function(i) {
+    it = items[[i]]
+    fade = if (is.null(it$opacity)) "" else sprintf(";opacity:%.2f", it$opacity)
+    sw = if (isTRUE(it$dash)) {
+      sprintf('<i class="sw dash" style="border-top-color:%s%s"></i>', it$color, fade)
+    } else {
+      sprintf('<i class="sw" style="background:%s%s"></i>', it$color, fade)
+    }
+    paste0("<span>", sw, html_escape(it$label), "</span>")
+  }, ""), collapse = ""), "</div>")
+}
+
+svg_x = function(x, xmin, xmax, x0, x1) x0 + (x - xmin) / (xmax - xmin) * (x1 - x0)
+svg_y = function(y, ymin, ymax, y0, y1) y1 - (y - ymin) / (ymax - ymin) * (y1 - y0)
+svg_pts = function(x, y, xmin, xmax, ymin, ymax, x0, x1, y0, y1) {
+  paste(sprintf("%.1f,%.1f",
+                svg_x(x, xmin, xmax, x0, x1),
+                svg_y(y, ymin, ymax, y0, y1)), collapse = " ")
+}
+svg_runs = function(x, y, xmin, xmax, ymin, ymax, x0, x1, y0, y1, color, width,
+                    dash = FALSE, cls = "", opacity = 1) {
+  ok = is.finite(x) & is.finite(y)
+  if (!any(ok)) return("")
+  ix = which(ok)
+  run_id = cumsum(c(1L, diff(ix) != 1L))
+  dash_attr = if (dash) ' stroke-dasharray="6 3"' else ""
+  class_attr = if (nzchar(cls)) sprintf(' class="%s"', cls) else ""
+  hide = if (grepl("opt", cls, fixed = TRUE)) ' style="display:none"' else ""
+  fade = if (is.finite(opacity) && opacity < 1) sprintf(' stroke-opacity="%.2f"', opacity) else ""
+  paste(vapply(split(ix, run_id), function(seg) {
+    if (length(seg) < 2L) return("")
+    sprintf('<polyline%s fill="none" stroke="%s" stroke-width="%s"%s%s%s points="%s"/>',
+            class_attr, color, width, dash_attr, fade, hide,
+            svg_pts(x[seg], y[seg], xmin, xmax, ymin, ymax, x0, x1, y0, y1))
+  }, ""), collapse = "")
+}
+
+toggle_btns = function() paste0(
+  '<div class="togs">',
+  '<button type="button" class="tog" data-series="insitu" aria-pressed="false">',
+  '<i class="sw" style="background:#1d4ed8"></i>In-situ</button>',
+  '<button type="button" class="tog" data-series="awsom" aria-pressed="false">',
+  '<i class="sw" style="background:#c2410c"></i>AWSoM</button>',
+  '</div>'
+)
+
+chart_script = function() paste0(
+  '<script>',
+  'document.addEventListener("click",function(ev){',
+  'var b=ev.target.closest("button.tog");if(!b)return;',
+  'var on=b.getAttribute("aria-pressed")!=="true";',
+  'b.setAttribute("aria-pressed",on?"true":"false");',
+  'var box=b.closest("figure");if(!box)return;',
+  'var lines=box.querySelectorAll("."+b.getAttribute("data-series"));',
+  'for(var i=0;i<lines.length;i++)lines[i].style.display=on?"":"none";',
+  '});',
+  '</script>'
+)
+
+page_css = function(extra = "") {
+  paste0(
+    'body{margin:0;background:#fafaf9;color:#1c1917;font:16px/1.45 system-ui,sans-serif;}',
+    'main{width:100%;max-width:980px;margin:0 auto;padding:28px 20px 64px;box-sizing:border-box;}',
+    'nav{display:flex;gap:16px;margin:0 0 18px;font-size:14px;}',
+    'nav a{color:#1d4ed8;text-decoration:none;} nav a:hover{text-decoration:underline;}',
+    'nav .here{color:#1c1917;font-weight:650;}',
+    'h1{font-size:28px;font-weight:650;margin:0 0 6px;}',
+    'h2{font-size:18px;margin:32px 0 8px;}',
+    'p,figcaption{color:#57534e;}',
+    '.meta{display:flex;flex-wrap:wrap;gap:12px;margin:18px 0 8px;}',
+    '.meta div{background:#fff;border:1px solid #e7e5e4;border-radius:10px;padding:12px 14px;min-width:180px;}',
+    '.meta b{display:block;font-size:20px;color:#1c1917;}',
+    '.legend{display:flex;gap:12px 16px;flex-wrap:wrap;font-size:13px;margin:2px 0 6px;color:#44403c;}',
+    '.sw{display:inline-block;width:18px;height:3px;margin-right:6px;vertical-align:middle;}',
+    '.sw.dash{height:0;border-top:2px dashed;background:transparent;}',
+    'table{border-collapse:collapse;width:100%;background:#fff;font-size:14px;font-variant-numeric:tabular-nums;}',
+    'th,td{border-bottom:1px solid #e7e5e4;padding:7px 8px;text-align:right;white-space:nowrap;}',
+    'th:first-child,td:first-child{text-align:left;}',
+    'th{color:#57534e;font-weight:600;}',
+    '.wrap{overflow-x:auto;max-width:100%;border:1px solid #e7e5e4;border-radius:10px;}',
+    '.wrap.scroll{max-height:260px;overflow:auto;}',
+    '.wrap.scroll table{border-collapse:separate;border-spacing:0;}',
+    '.wrap.scroll thead th{position:sticky;top:0;background:#fff;z-index:1;box-shadow:inset 0 -1px 0 #e7e5e4;}',
+    'svg{width:100%;max-width:100%;height:auto;display:block;}',
+    '.togs{display:flex;gap:8px;margin:4px 0 8px;}',
+    'button.tog{border:1px solid #e7e5e4;background:#fff;border-radius:999px;padding:3px 10px;font:13px system-ui,sans-serif;color:#44403c;cursor:pointer;}',
+    'button.tog[aria-pressed="true"]{background:#1c1917;color:#fff;border-color:#1c1917;}',
+    extra)
+}
+
+write_html = function(path, page) {
+  if (Sys.getlocale("LC_CTYPE") == "C") {
+    try(Sys.setlocale("LC_CTYPE", "en_US.UTF-8"), silent = TRUE)
+  }
+  raw = charToRaw(enc2utf8(page))
+  con = file(path, open = "wb")
+  writeBin(raw, con)
+  close(con)
+  invisible(path)
+}
+
+outlook_baseline_section = function(ev) {
+  col_fc = "#047857"
+  col_obs = "#1d4ed8"
+  col_mod = "#c2410c"
+  col_rec = "#7c3aed"
+  col_true = "#a8a29e"
+  met = ev$metrics
+  order_in = c("Best matched cycle", "Boosted", "In-situ", "AWSoM")
+  met = met[order(met$lead_end_hr, match(met$input, order_in)), ]
+  fmt_cor = function(x) if (!is.finite(x)) "" else fmt_num(x, 3)
+  skill_td = function(x) {
+    if (!is.finite(x)) return("<td></td>")
+    color = if (x > 0) "#087F23" else if (x < 0) "#b91c1c" else "#57534e"
+    sprintf('<td style="color:%s">%+.3f</td>', color, x)
+  }
+  metric_rows = function(frame) {
+    paste(vapply(seq_len(nrow(frame)), function(i) {
+      sprintf("<tr><td>%dh</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>%s</tr>",
+              frame$lead_end_hr[i], html_escape(frame$input[i]), frame$n[i],
+              fmt_num(frame$RMSE[i], 3), fmt_num(frame$MAE[i], 3), fmt_cor(frame$Correlation[i]),
+              skill_td(frame$skill_RMSE[i]))
+    }, ""), collapse = "\n")
+  }
+  endpoint = met[met$lead_end_hr == max(met$lead_end_hr), ]
+
+  series_svg = function(x, y_true_v, y_hat_v, y_rec_v, y_obs_v, y_mod_v, tick_by) {
+    xmin = min(x); xmax = max(x)
+    if (xmin == xmax) xmax = xmin + 1
+    ymax_s = max(9, ceiling(max(c(y_true_v, y_hat_v, y_rec_v, y_obs_v, y_mod_v), na.rm = TRUE)))
+    ymin_s = 0
+    yticks_s = if (ymax_s <= 9) c(0, 3, 6, 9) else pretty(c(0, ymax_s), n = 4)
+    sw = 760; sh = 270; sx0 = 44; sx1 = 730; sy0 = 16; sy1 = 214
+    grid_s = paste(vapply(yticks_s, function(g) {
+      yy = svg_y(g, ymin_s, ymax_s, sy0, sy1)
+      sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', sx0, yy, sx1, yy)
+    }, ""), collapse = "")
+    ylab_s = paste(vapply(yticks_s, function(g) {
+      sprintf('<text x="36" y="%.1f" text-anchor="end" font-size="12" fill="#57534e">%g</text>',
+              svg_y(g, ymin_s, ymax_s, sy0, sy1) + 4, g)
+    }, ""), collapse = "")
+    t_min = as.POSIXct(xmin, origin = "1970-01-01", tz = "UTC")
+    t_max = as.POSIXct(xmax, origin = "1970-01-01", tz = "UTC")
+    if (tick_by == "month") {
+      ticks = seq(as.POSIXct(format(t_min, "%Y-%m-01"), tz = "UTC"), t_max, by = "month")
+      lab = format(ticks, "%b", tz = "UTC")
+    } else {
+      ticks = seq(as.POSIXct(format(t_min, "%Y-%m-%d"), tz = "UTC"), t_max, by = "2 days")
+      lab = format(ticks, "%m-%d", tz = "UTC")
+    }
+    keep_tick = ticks >= t_min & ticks <= t_max
+    ticks = ticks[keep_tick]
+    lab = lab[keep_tick]
+    xlab = if (!length(ticks)) "" else paste(vapply(seq_along(ticks), function(i) {
+      sprintf('<text x="%.1f" y="236" text-anchor="middle" font-size="11" fill="#57534e">%s</text>',
+              svg_x(as.numeric(ticks[i]), xmin, xmax, sx0, sx1), lab[i])
+    }, ""), collapse = "")
+    sprintf(paste0(
+      '<svg viewBox="0 0 %d %d" role="img" aria-label="27 day outlook score">',
+      '<text x="14" y="110" text-anchor="middle" font-size="12" fill="#57534e" transform="rotate(-90 14 110)">Kp</text>',
+      grid_s, ylab_s, xlab, "%s%s%s%s%s</svg>"),
+      sw, sh,
+      svg_runs(x, y_true_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_true, "1.2"),
+      svg_runs(x, y_hat_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_fc, "2.2"),
+      svg_runs(x, y_rec_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_rec, "1.8", opacity = 0.45),
+      svg_runs(x, y_obs_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_obs, "1.8", cls = "opt insitu", opacity = 0.55),
+      svg_runs(x, y_mod_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_mod, "1.8", cls = "opt awsom", opacity = 0.55))
+  }
+  legend = paste0(legend_html(list(
+    list(color = col_true, label = "Observed Kp"),
+    list(color = col_fc, label = "Boosted"),
+    list(color = col_rec, label = "Best matched cycle", opacity = 0.7)
+  )), toggle_btns())
+  chart_leads = c(24L, 168L, 648L)
+  chart_title = c("24" = "24 hours ahead", "168" = "7 days ahead", "648" = "27 days ahead")
+  chart_note = c(
+    "24" = "Each point is one 3-hour Kp bin, the period that ends 24 hours after the forecast was issued. Gray was observed later. Green is Boosted. Violet is the Kp that followed the closest aligned OMNI cycle, drawn lightly so it does not cover the forecast. The buttons add the in-situ and AWSoM forecasts on top.",
+    "168" = "The 3-hour period that ends 7 days after the forecast was issued.",
+    "648" = "The 3-hour period that ends 27 days after the forecast was issued. This is the endpoint of the 27-day outlook."
+  )
+  charts = paste(vapply(chart_leads, function(lead) {
+    j = match(lead, ev$leads_hr)
+    use = is.finite(ev$y_true_bin[, j]) & is.finite(ev$y_boost_bin[, j])
+    x = as.numeric(ev$tau[use]) + lead * 3600
+    y_true_v = ev$y_true_bin[use, j]
+    y_hat_v = ev$y_boost_bin[use, j]
+    y_rec_v = ev$y_match_bin[use, j]
+    y_obs_v = ev$y_insitu_bin[use, j]
+    y_mod_v = ev$y_awsom_bin[use, j]
+    recent = x >= (max(x) - 14 * 86400)
+    title = chart_title[[as.character(lead)]]
+    full = paste0("<figure><figcaption>", title, ", whole test period</figcaption><p>",
+                  html_escape(chart_note[[as.character(lead)]]), "</p>", legend,
+                  series_svg(x, y_true_v, y_hat_v, y_rec_v, y_obs_v, y_mod_v, "month"),
+                  "</figure>")
+    zoom = paste0("<figure><figcaption>", title, ", latest 14 days of scored forecasts</figcaption><p>",
+                  "The date is the end of that 3-hour period. The same chart, kept to the latest 14 of those periods.</p>",
+                  legend,
+                  series_svg(x[recent], y_true_v[recent], y_hat_v[recent],
+                             y_rec_v[recent], y_obs_v[recent], y_mod_v[recent], "day"),
+                  "</figure>")
+    paste0(full, zoom)
+  }, ""), collapse = "")
+  paste0(
+    '<h2>Next 27 days, scored after the fact</h2>',
+    '<p>Same criteria as the 24-hour forecast above. Each lead is one 3-hour Kp bin. ',
+    'A lead is scored as soon as that period has ended, using Kp through the latest ended bin, including bins added after the processed file. ',
+    'The 3-hour lead therefore reaches the current Kp. The 27-day lead reaches Kp from about four weeks earlier. ',
+    'The reference is the Kp that followed the closest aligned OMNI cycle from 1995 through January 2026, not persistence. ',
+    'Skill = 1 - RMSE / RMSE of that matched cycle. Positive skill is better than repeating that cycle. ',
+    'The endpoint is the Kp bin that ends exactly 27 days after issue time.</p>',
+    '<p>The forecast is the 24-hour model stepped forward one day at a time. The first day is that 24-hour forecast. Later days read the solar wind that followed the closest aligned OMNI cycle, and the Kp just predicted becomes the next day&rsquo;s recent Kp. ',
+    'The chart shows Boosted. Violet is the single closest cycle, drawn lightly so it does not cover Boosted. The buttons add In-situ and AWSoM on top of those lines.</p>',
+    '<h2>Endpoint criteria</h2>',
+    '<div class="wrap"><table><thead><tr>',
+    '<th>Lead</th><th>Input</th><th>n</th><th>RMSE</th><th>MAE</th><th>Correlation</th><th>Skill</th>',
+    '</tr></thead><tbody>', metric_rows(endpoint), '</tbody></table></div>',
+    '<h2>Criteria by lead</h2>',
+    '<p>Leads of the 27-day outlook, from 3 hours through 27 days. Later leads have fewer forecasts because those periods have not all ended yet.</p>',
+    '<div class="wrap scroll"><table><thead><tr>',
+    '<th>Lead</th><th>Input</th><th>n</th><th>RMSE</th><th>MAE</th><th>Correlation</th><th>Skill</th>',
+    '</tr></thead><tbody>', metric_rows(met), '</tbody></table></div>',
+    charts
+  )
+}
+
+write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_value,
+                               issue_time, generated_at, ab_live, lag_obs_hr, lag_mod_hr,
+                               kp_step_hr = 3L, outlook = NULL,
+                               kp_obs_time = NULL, kp_obs_value = NULL, kp_obs_source = NULL,
+                               kp_history_note = NULL) {
+  col_obs = "#1d4ed8"
+  col_mod = "#c2410c"
+  col_boost = "#047857"
+  col_pers = "#6b7280"
+  f24o = forecast[forecast$input == "Earth_obs" & forecast$horizon_hr == 24, ]
+  f24m = forecast[forecast$input == "model_affine" & forecast$horizon_hr == 24, ]
+  f24o = f24o[order(f24o$lead_end_hr), ]
+  f24m = f24m[order(f24m$lead_end_hr), ]
+  if (!nrow(f24o) || !nrow(f24m)) stop("Forecast rows are missing.")
+  pers = f24o$y_persistence[1]
+  y_boost24 = if (!is.null(outlook) && nrow(outlook) >= length(f24o$y_pred))
+    outlook$y_boost[seq_along(f24o$y_pred)] else f24o$y_pred
+
+  W = 760; H = 300; x0 = 52; x1 = 730; y0 = 24; y1 = 248
+  leads = f24o$lead_end_hr
+  xmin = 0; xmax = 27; ymin = 0
+  ymax = max(c(f24o$y_pred, f24m$y_pred, y_boost24, pers), na.rm = TRUE)
+  ymax = if (ymax <= 4) 4 else 9
+  yticks = if (ymax <= 4) 0:4 else c(0, 3, 6, 9)
+  grid = paste(vapply(yticks, function(g) {
+    yy = svg_y(g, ymin, ymax, y0, y1)
+    sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', x0, yy, x1, yy)
+  }, ""), collapse = "")
+  ylab = paste(vapply(yticks, function(g) {
+    yy = svg_y(g, ymin, ymax, y0, y1)
+    sprintf('<text x="44" y="%.1f" text-anchor="end" font-size="12" fill="#57534e">%g</text>', yy + 4, g)
+  }, ""), collapse = "")
+  xlab = paste(vapply(leads, function(h) {
+    xx = svg_x(h, xmin, xmax, x0, x1)
+    sprintf('<text x="%.1f" y="268" text-anchor="middle" font-size="12" fill="#57534e">%dh</text>', xx, h)
+  }, ""), collapse = "")
+  pers_y = svg_y(pers, ymin, ymax, y0, y1)
+  forecast_svg = sprintf(paste0(
+    '<svg viewBox="0 0 %d %d" role="img" aria-label="Kp forecast">',
+    grid, ylab, xlab,
+    '<text x="14" y="136" text-anchor="middle" font-size="12" fill="#57534e" transform="rotate(-90 14 136)">Kp</text>',
+    '<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="%s" stroke-dasharray="5 4" stroke-width="1.5"/>',
+    '%s%s%s',
+    '<text x="%g" y="292" font-size="12" fill="#57534e">Hours after the forecast was issued</text>',
+    '</svg>'),
+    W, H,
+    x0, pers_y, x1, pers_y, col_pers,
+    svg_runs(leads, y_boost24, xmin, xmax, ymin, ymax, x0, x1, y0, y1, col_boost, "2.4"),
+    svg_runs(leads, f24o$y_pred, xmin, xmax, ymin, ymax, x0, x1, y0, y1, col_obs, "2.2", cls = "opt insitu", opacity = 0.55),
+    svg_runs(leads, f24m$y_pred, xmin, xmax, ymin, ymax, x0, x1, y0, y1, col_mod, "2.2", cls = "opt awsom", opacity = 0.55),
+    x0)
+
+  forecast_rows_html = paste(vapply(seq_along(leads), function(i) {
+    sprintf("<tr><td>%s</td><td>%dh</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+            html_escape(f24o$target_bin_end[i]), leads[i],
+            fmt_num(y_boost24[i], 3), fmt_num(f24o$y_pred[i], 3),
+            fmt_num(f24m$y_pred[i], 3), fmt_num(pers, 3))
+  }, ""), collapse = "\n")
+
+  outlook_html = ""
+  if (!is.null(outlook) && nrow(outlook)) {
+    day_end = parse_utc(outlook$day_end)
+    x_day = as.numeric(day_end)
+    has_obs = length(kp_obs_time) > 0 && any(is.finite(kp_obs_value))
+    W2 = 760; H2 = 300; ox0 = 52; ox1 = 730; oy0 = 24; oy1 = 248
+    tick_start = as.POSIXct(format(issue_time, "%Y-%m-%d"), tz = "UTC")
+    oxmin = as.numeric(tick_start) - 18 * 3600
+    oxmax = max(x_day)
+    if (has_obs) {
+      in_win = is.finite(as.numeric(kp_obs_time)) & is.finite(kp_obs_value) &
+        as.numeric(kp_obs_time) >= as.numeric(tick_start) & as.numeric(kp_obs_time) <= oxmax
+      kp_obs_time = kp_obs_time[in_win]
+      kp_obs_value = kp_obs_value[in_win]
+      has_obs = length(kp_obs_time) > 0
+    }
+    col_boost = "#047857"
+    col_match = "#7c3aed"
+    col_seen = "#44403c"
+    oymin = 0
+    y_for_scale = c(outlook$y_insitu, outlook$y_awsom, outlook$y_boost, outlook$y_matched)
+    if (has_obs) y_for_scale = c(y_for_scale, kp_obs_value)
+    oymax = max(y_for_scale, na.rm = TRUE)
+    oymax = if (!is.finite(oymax) || oymax <= 4) 4 else 9
+    oyticks = if (oymax <= 4) 0:4 else c(0, 3, 6, 9)
+    ogrid = paste(vapply(oyticks, function(g) {
+      yy = svg_y(g, oymin, oymax, oy0, oy1)
+      sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', ox0, yy, ox1, yy)
+    }, ""), collapse = "")
+    oylab = paste(vapply(oyticks, function(g) {
+      yy = svg_y(g, oymin, oymax, oy0, oy1)
+      sprintf('<text x="44" y="%.1f" text-anchor="end" font-size="12" fill="#57534e">%g</text>', yy + 4, g)
+    }, ""), collapse = "")
+    tick_end = as.POSIXct(oxmax, origin = "1970-01-01", tz = "UTC")
+    oticks = seq(tick_start, tick_end, by = "7 days")
+    oticks = oticks[as.numeric(oticks) >= oxmin & as.numeric(oticks) <= oxmax]
+    if (!length(oticks) || as.numeric(tail(oticks, 1)) < oxmax - 2 * 86400) {
+      oticks = c(oticks, as.POSIXct(format(tick_end, "%Y-%m-%d"), tz = "UTC"))
+    }
+    oxlab = paste(vapply(oticks, function(t) {
+      xx = svg_x(as.numeric(t), oxmin, oxmax, ox0, ox1)
+      sprintf('<text x="%.1f" y="268" text-anchor="middle" font-size="12" fill="#57534e">%s</text>',
+              xx, trimws(format(t, "%b %e", tz = "UTC")))
+    }, ""), collapse = "")
+    line_of = function(y, color, width, cls = "", opacity = 1) svg_runs(
+      x_day, y, oxmin, oxmax, oymin, oymax, ox0, ox1, oy0, oy1, color, width,
+      cls = cls, opacity = opacity)
+    obs_pts = if (!has_obs) "" else svg_runs(
+      as.numeric(kp_obs_time), kp_obs_value, oxmin, oxmax, oymin, oymax,
+      ox0, ox1, oy0, oy1, col_seen, "2.2")
+    outlook_svg = sprintf(paste0(
+      '<svg viewBox="0 0 %d %d" role="img" aria-label="27 day Kp outlook">',
+      ogrid, oylab, oxlab,
+      '<text x="14" y="136" text-anchor="middle" font-size="12" fill="#57534e" transform="rotate(-90 14 136)">Kp</text>',
+      '%s%s%s%s%s',
+      '<text x="%g" y="292" font-size="12" fill="#57534e">Date (UTC)</text>',
+      '</svg>'),
+      W2, H2,
+      obs_pts,
+      line_of(outlook$y_boost, col_boost, "2.4"),
+      line_of(outlook$y_matched, col_match, "1.8", opacity = 0.45),
+      line_of(outlook$y_insitu, col_obs, "2.0", "opt insitu", 0.55),
+      line_of(outlook$y_awsom, col_mod, "2.0", "opt awsom", 0.55),
+      ox0)
+    outlook_rows = paste(vapply(seq_len(nrow(outlook)), function(i) {
+      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+              outlook$day[i], html_escape(outlook$day_end[i]),
+              fmt_num(outlook$y_insitu[i], 3), fmt_num(outlook$y_awsom[i], 3),
+              fmt_num(outlook$y_boost[i], 3), fmt_num(outlook$y_matched[i], 3))
+    }, ""), collapse = "\n")
+    obs_note = ""
+    if (has_obs) {
+      obs_note = paste0(
+        '<p>Gray is observed Kp from the day the forecast was issued through the latest reading, ',
+        format(min(kp_obs_time), "%d %b %H:%M", tz = "UTC"), ' through ',
+        format(max(kp_obs_time), "%d %b %H:%M", tz = "UTC"), ' UTC. ')
+      if (identical(kp_obs_source, "NOAA")) {
+        obs_note = paste0(obs_note,
+          'These readings are NOAA planetary Kp, rounded to the nearest third. ')
+      }
+      obs_note = paste0(obs_note, 'Later periods have not ended, so they have no observed Kp yet.</p>')
+    }
+    legend_items = list(
+      list(color = col_boost, label = "Boosted"),
+      list(color = col_match, label = "Best matched cycle", opacity = 0.7)
+    )
+    if (has_obs) {
+      legend_items = c(list(list(color = col_seen, label = "Observed Kp")), legend_items)
+    }
+    outlook_html = paste0(
+      '<h2>Next 27 days</h2>',
+      '<p>Each point is one 3-hour Kp, placed at the time that period ends. ',
+      'Eight periods make a day. The first ends 3 hours after the forecast was issued, and the last ends 27 days after. ',
+      'The Kp scale is the same as the chart above.</p>',
+      '<p>The line on the chart is Boosted. It is the same 24-hour model as the chart above, stepped forward one day at a time. ',
+      'The first day is that 24-hour forecast. After the solar wind already in hand, the model reads the solar wind that followed the closest aligned OMNI cycle, from 1995 through January 2026. ',
+      'The Kp just predicted is then the recent Kp for the next day. ',
+      'Boosted uses the AWSoM value only when the latest observed Kp is high enough that earlier storms of the same lead favored that blend. Otherwise it stays on the in-situ forecast. ',
+      'The buttons add those two forecasts on top, drawn lightly so they do not cover the lines under them. ',
+      'Violet is the Kp that followed the closest cycle, also drawn lightly. It is the comparison, not another forecast.</p>',
+      obs_note,
+      '<figure>',
+      legend_html(legend_items),
+      toggle_btns(),
+      outlook_svg,
+      '</figure>',
+      '<div class="wrap scroll"><table><thead><tr>',
+      '<th>Day</th><th>Period ends (UTC)</th><th>In-situ</th><th>AWSoM</th><th>Boosted</th><th>Best matched cycle</th>',
+      '</tr></thead><tbody>', outlook_rows, '</tbody></table></div>'
+    )
+  }
+
+  kp_end = kp_bin_start + kp_step_hr * 3600
+  kp_rows_html = paste(vapply(seq_along(kp_bin_value), function(i) {
+    sprintf("<tr><td>%s</td><td>%s</td><td>%s</td></tr>",
+            html_escape(fmt_utc(kp_bin_start[i])),
+            html_escape(fmt_utc(kp_end[i])),
+            fmt_num(kp_bin_value[i], 3))
+  }, ""), collapse = "\n")
+
+  feature_meta = list(
+    B = list(label = "Magnetic field strength", unit = "nT", digits = 2,
+             note = "How strong the magnetic field in the solar wind is."),
+    Bz = list(label = "Magnetic field, north-south", unit = "nT", digits = 2,
+              note = "Below zero means the field points south. Southward field disturbs Earth more."),
+    Vs = list(label = "Solar-wind speed", unit = "km/s", digits = 1,
+              note = "How fast the solar wind is moving."),
+    Pd = list(label = "Proton density", unit = "per cm3", digits = 2,
+              note = "How many solar-wind protons are packed into a cubic centimeter."),
+    Pt = list(label = "Temperature", unit = "K", digits = 0,
+              note = "How hot the solar wind is.")
+  )
+  obs_d = drivers[drivers$input == "Earth_obs", ]
+  mod_d = drivers[drivers$input == "model_affine", ]
+  obs_d = obs_d[order(obs_d$hour_start), ]
+  mod_d = mod_d[order(mod_d$hour_start), ]
+  hours_x = seq_along(obs_d$hour_start)
+  hour_lab = format(parse_utc(obs_d$hour_start), "%m-%d %H:%M", tz = "UTC")
+  hour_tick = format(parse_utc(obs_d$hour_start), "%H:%M", tz = "UTC")
+  charts = vapply(names(feature_meta), function(nm) {
+    meta = feature_meta[[nm]]
+    yo = obs_d[[nm]]
+    ym = mod_d[[nm]]
+    rng = range(c(yo, ym))
+    pad = diff(rng)
+    if (!is.finite(pad) || pad < 1e-8) pad = max(1, abs(rng[1]) * 0.05)
+    else pad = pad * 0.1
+    ylo = rng[1] - pad
+    yhi = rng[2] + pad
+    cw = 520; ch = 220; cx0 = 78; cx1 = 500; cy0 = 16; cy1 = 168
+    xt = c(1L, 8L, 16L, length(hours_x))
+    xlabels = paste(vapply(xt, function(i) {
+      sprintf('<text x="%.1f" y="190" text-anchor="middle" font-size="11" fill="#57534e">%s</text>',
+              svg_x(i, 1, length(hours_x), cx0, cx1), html_escape(hour_tick[i]))
+    }, ""), collapse = "")
+    yticks2 = pretty(c(ylo, yhi), n = 4)
+    yticks2 = yticks2[yticks2 >= ylo & yticks2 <= yhi]
+    ylabels = paste(vapply(yticks2, function(g) {
+      sprintf('<text x="70" y="%.1f" text-anchor="end" font-size="11" fill="#57534e">%s</text>',
+              svg_y(g, ylo, yhi, cy0, cy1) + 4, fmt_num(g, meta$digits))
+    }, ""), collapse = "")
+    grids = paste(vapply(yticks2, function(g) {
+      yy = svg_y(g, ylo, yhi, cy0, cy1)
+      sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', cx0, yy, cx1, yy)
+    }, ""), collapse = "")
+    sw_legend = legend_html(list(
+      list(color = col_obs, label = "Measured near Earth"),
+      list(color = col_mod, label = "AWSoM model")
+    ))
+    sprintf(paste0(
+      '<figure><figcaption>%s <span>(%s)</span></figcaption>',
+      '<p>%s</p>',
+      '%s',
+      '<svg viewBox="0 0 %d %d" role="img" aria-label="%s">',
+      grids, ylabels, xlabels,
+      '<polyline fill="none" stroke="%s" stroke-width="2.2" points="%s"/>',
+      '<polyline fill="none" stroke="%s" stroke-width="2.2" points="%s"/>',
+      '</svg></figure>'),
+      html_escape(meta$label), html_escape(meta$unit),
+      html_escape(meta$note),
+      sw_legend,
+      cw, ch, html_escape(meta$label),
+      col_obs, svg_pts(hours_x, yo, 1, length(hours_x), ylo, yhi, cx0, cx1, cy0, cy1),
+      col_mod, svg_pts(hours_x, ym, 1, length(hours_x), ylo, yhi, cx0, cx1, cy0, cy1))
+  }, "")
+
+  sw_rows = paste(vapply(seq_along(hours_x), function(i) {
+    sprintf("<tr><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+            html_escape(hour_lab[i]), obs_d$n_native[i],
+            fmt_num(obs_d$B[i], 2), fmt_num(obs_d$Bz[i], 2), fmt_num(obs_d$Vs[i], 1),
+            fmt_num(obs_d$Pd[i], 2), fmt_num(obs_d$Pt[i], 0),
+            mod_d$n_native[i],
+            fmt_num(mod_d$B[i], 2), fmt_num(mod_d$Bz[i], 2), fmt_num(mod_d$Vs[i], 1),
+            fmt_num(mod_d$Pd[i], 2), fmt_num(mod_d$Pt[i], 0))
+  }, ""), collapse = "\n")
+
+  page = paste0(
+    '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Kp realtime forecast</title><style>',
+    page_css(paste0(
+      '.charts{display:grid;grid-template-columns:1fr;gap:8px;}',
+      '@media(min-width:800px){.charts{grid-template-columns:1fr 1fr;}}',
+      'figure{margin:0 0 12px;background:#fff;border:1px solid #e7e5e4;border-radius:10px;padding:8px 10px 4px;min-width:0;}',
+      'figcaption{font-size:14px;margin-bottom:2px;} figcaption span{color:#a8a29e;}',
+      'figure p{margin:4px 0 6px;font-size:14px;}',
+      'details{margin-top:12px;} summary{cursor:pointer;color:#57534e;}'
+    )),
+    '</style></head><body><main>',
+    '<nav><span class="here">Realtime</span><a href="VARX_Kp_baseline.html">Baseline</a></nav>',
+    '<h1>Kp forecast</h1>',
+    '<p>Kp is a number from 0 to 9 that says how disturbed Earth&rsquo;s magnetic field is. ',
+    'Higher means a stronger disturbance. As a rough guide, 0 to 2 is quiet, 3 is unsettled, 4 is active, 5 is a minor storm, and 6 or more is a stronger storm. ',
+    'Times on this page are UTC.</p>',
+    '<p>The first chart is the next 24 hours, in 3-hour steps. The second is the next 27 days, also in 3-hour steps. ',
+    'The forecast was issued at the time shown below, using only information that had already arrived by then.</p>',
+    if (is.null(kp_history_note) || !nzchar(kp_history_note)) "" else paste0(
+      '<p>', html_escape(kp_history_note), '</p>'),
+    '<div class="meta">',
+    '<div>Forecast issued (UTC)<b>', html_escape(fmt_utc(issue_time)), '</b></div>',
+    '<div>Latest measured Kp<b>', fmt_num(kp_bin_value[length(kp_bin_value)], 3), '</b></div>',
+    '<div>Page made (UTC)<b>', html_escape(generated_at), '</b></div>',
+    '</div>',
+    '<h2>Next 24 hours</h2>',
+    '<p>Read the chart from left to right. The left side is 3 hours after the forecast was issued, and the right side is 24 hours after. ',
+    'The height is the Kp expected at the end of that 3-hour step.</p>',
+    '<p>The green line is Boosted, the forecast this page issues. It starts from the solar wind measured near Earth. ',
+    'When the latest Kp is already high, and earlier storms of that lead were closer to the AWSoM forecast, it blends the two. ',
+    'Otherwise it stays on the measured-solar-wind forecast. ',
+    'The buttons add that measured forecast and the AWSoM forecast. ',
+    'The dashed line is not a forecast. It is the latest Kp, drawn flat, so you can see whether the forecast expects a change.</p>',
+    '<p>Today&rsquo;s solar wind is used here because it is what is reaching Earth now and over the next day. ',
+    'The forecast cannot see solar wind that has not arrived yet, so it will not rise ahead of a storm that has not started to show in the measurements.</p>',
+    '<figure>',
+    legend_html(list(
+      list(color = col_boost, label = "Boosted"),
+      list(color = col_pers, label = "Latest Kp, held flat", dash = TRUE)
+    )),
+    toggle_btns(),
+    forecast_svg,
+    '</figure>',
+    '<div class="wrap"><table><thead><tr>',
+    '<th>3-hour period ends (UTC)</th><th>Hours ahead</th><th>Boosted</th>',
+    '<th>In-situ</th><th>AWSoM</th><th>Latest Kp</th>',
+    '</tr></thead><tbody>', forecast_rows_html, '</tbody></table></div>',
+    outlook_html,
+    '<h2>Kp over the past day</h2>',
+    '<p>These eight values are the Kp that had already been recorded when the forecast was issued. Both the 24-hour forecast and the 27-day outlook start from this history.</p>',
+    '<div class="wrap"><table><thead><tr><th>Period starts (UTC)</th><th>Period ends (UTC)</th><th>Kp</th></tr></thead><tbody>',
+    kp_rows_html, '</tbody></table></div>',
+    '<h2>Solar wind over the past day</h2>',
+    '<p>These charts are not a forecast. They are the solar wind during the 24 hours before the forecast was issued, and they are the solar-wind input to the 24-hour chart only. ',
+    'Blue is what was measured near Earth. Orange is the AWSoM model, adjusted so its usual level matches the long-term solar-wind record (',
+    html_escape(fmt_utc(ab_live$start)), ' through ', html_escape(fmt_utc(ab_live$end)),
+    '). The hours being forecast are not included. ',
+    'The measured record for this forecast looks back ', fmt_num(lag_obs_hr / 24, 0),
+    ' days for a similar solar-wind pattern, and the model record looks back ',
+    fmt_num(lag_mod_hr / 24, 0), ' days.</p>',
+    '<div class="charts">', paste(charts, collapse = ""), '</div>',
+    '<details><summary>Show the 24 hourly values</summary>',
+    '<div class="wrap scroll"><table><thead><tr>',
+    '<th>Hour start UTC</th><th>Measured samples</th><th>Measured |B|</th><th>Measured Bz</th><th>Measured Vs</th><th>Measured Pd</th><th>Measured Pt</th>',
+    '<th>AWSoM samples</th><th>AWSoM |B|</th><th>AWSoM Bz</th><th>AWSoM Vs</th><th>AWSoM Pd</th><th>AWSoM Pt</th>',
+    '</tr></thead><tbody>', sw_rows, '</tbody></table></div></details>',
+    chart_script(),
+    '</main></body></html>'
+  )
+  write_html(path, page)
+}
+
+write_baseline_page = function(path, base, generated_at, outlook_eval = NULL) {
+  col_obs = "#1d4ed8"
+  col_mod = "#c2410c"
+  col_boost = "#047857"
+  col_pers = "#6b7280"
+  col_true = "#a8a29e"
+  metrics = base$metrics
+  tau = base$tau
+  y_true = base$y_true
+  pers = base$pers
+  order_in = c("Persistence", lab_meas, lab_awso, lab_boost)
+  input_col = c(col_pers, col_obs, col_mod, col_boost)
+  names(input_col) = order_in
+
+  fmt_cor = function(x) if (!is.finite(x)) "" else fmt_num(x, 3)
+  skill_td = function(x) {
+    if (!is.finite(x)) return("<td></td>")
+    color = if (x > 0) "#087F23" else if (x < 0) "#b91c1c" else "#57534e"
+    sprintf('<td style="color:%s">%+.3f</td>', color, x)
+  }
+  metric_rows = function(frame) {
+    paste(vapply(seq_len(nrow(frame)), function(i) {
+      sprintf("<tr><td>%dh</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td>%s</tr>",
+              frame$lead_end_hr[i], html_escape(frame$input[i]), frame$n[i],
+              fmt_num(frame$RMSE[i], 3), fmt_num(frame$MAE[i], 3), fmt_cor(frame$Correlation[i]),
+              skill_td(frame$skill_RMSE[i]))
+    }, ""), collapse = "\n")
+  }
+  endpoint = metrics[metrics$lead_end_hr == metrics$horizon_hr, ]
+  endpoint = endpoint[order(match(endpoint$input, order_in)), ]
+
+  rmse_at = function(lead, input) {
+    hit = metrics[metrics$horizon_hr == 24 & metrics$lead_end_hr == lead & metrics$input == input, ]
+    if (!nrow(hit)) NA_real_ else hit$RMSE[1]
+  }
+  bar_leads = c(6L, 24L)
+  bar_groups = c("6 hours", "24 hours")
+  bar_spec = do.call(rbind, lapply(seq_along(bar_leads), function(g) {
+    data.frame(
+      group = bar_groups[g], input = order_in,
+      value = vapply(order_in, function(inp) rmse_at(bar_leads[g], inp), 0),
+      stringsAsFactors = FALSE)
+  }))
+  W = 760; H = 280; x0 = 52; x1 = 730; y0 = 28; y1 = 196
+  ymax = max(bar_spec$value) * 1.28
+  yticks = pretty(c(0, max(bar_spec$value)), n = 4)
+  yticks = yticks[yticks >= 0 & yticks <= ymax]
+  grid = paste(vapply(yticks, function(g) {
+    yy = svg_y(g, 0, ymax, y0, y1)
+    sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', x0, yy, x1, yy)
+  }, ""), collapse = "")
+  ylab = paste(vapply(yticks, function(g) {
+    sprintf('<text x="44" y="%.1f" text-anchor="end" font-size="12" fill="#57534e">%s</text>',
+            svg_y(g, 0, ymax, y0, y1) + 4, fmt_num(g, 2))
+  }, ""), collapse = "")
+  bar_w = 34
+  gap = 8
+  group_gap = 36
+  cluster = length(order_in) * bar_w + (length(order_in) - 1) * gap
+  total_w = length(bar_leads) * cluster + group_gap
+  x_cursor = x0 + ((x1 - x0) - total_w) / 2
+  bars = character(0)
+  for (g in seq_along(bar_leads)) {
+    group_x0 = x_cursor
+    rows = bar_spec[bar_spec$group == bar_groups[g], ]
+    for (i in seq_len(nrow(rows))) {
+      bh = (rows$value[i] / ymax) * (y1 - y0)
+      yy = y1 - bh
+      bars = c(bars, sprintf(paste0(
+        '<rect x="%.1f" y="%.1f" width="%g" height="%.1f" fill="%s" rx="3"/>',
+        '<text x="%.1f" y="%.1f" text-anchor="middle" font-size="11" fill="#1c1917">%s</text>'),
+        x_cursor, yy, bar_w, bh, input_col[[rows$input[i]]],
+        x_cursor + bar_w / 2, max(y0 + 12, yy - 6), fmt_num(rows$value[i], 3)))
+      x_cursor = x_cursor + bar_w + gap
+    }
+    x_cursor = x_cursor - gap
+    bars = c(bars, sprintf(
+      '<text x="%.1f" y="220" text-anchor="middle" font-size="13" fill="#1c1917">%s</text>',
+      (group_x0 + x_cursor) / 2, bar_groups[g]))
+    x_cursor = x_cursor + group_gap
+  }
+  bar_svg = sprintf(paste0(
+    '<figure><figcaption>RMSE at 6 hours and 24 hours</figcaption>',
+    '<p>Each group is one lead. All four inputs are shown.</p>',
+    legend_html(list(
+      list(color = col_pers, label = "Persistence"),
+      list(color = col_obs, label = lab_meas),
+      list(color = col_mod, label = lab_awso),
+      list(color = col_boost, label = lab_boost)
+    )),
+    '<svg viewBox="0 0 %d %d" role="img" aria-label="RMSE at 6 and 24 hours">',
+    grid, ylab, paste(bars, collapse = ""),
+    '<text x="%g" y="252" font-size="12" fill="#57534e">RMSE of that 3-hour Kp bin</text>',
+    '</svg></figure>'), W, H, x0)
+
+  series_svg = function(x, y_true_v, y_obs_v, y_mod_v, y_boost_v, tick_by) {
+    xmin = min(x); xmax = max(x)
+    if (xmin == xmax) xmax = xmin + 1
+    ymax_s = max(9, ceiling(max(c(y_true_v, y_obs_v, y_mod_v, y_boost_v), na.rm = TRUE)))
+    ymin_s = 0
+    yticks_s = if (ymax_s <= 9) c(0, 3, 6, 9) else pretty(c(0, ymax_s), n = 4)
+    sw = 760; sh = 270; sx0 = 44; sx1 = 730; sy0 = 16; sy1 = 214
+    grid_s = paste(vapply(yticks_s, function(g) {
+      yy = svg_y(g, ymin_s, ymax_s, sy0, sy1)
+      sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', sx0, yy, sx1, yy)
+    }, ""), collapse = "")
+    ylab_s = paste(vapply(yticks_s, function(g) {
+      sprintf('<text x="36" y="%.1f" text-anchor="end" font-size="12" fill="#57534e">%g</text>',
+              svg_y(g, ymin_s, ymax_s, sy0, sy1) + 4, g)
+    }, ""), collapse = "")
+    t_min = as.POSIXct(xmin, origin = "1970-01-01", tz = "UTC")
+    t_max = as.POSIXct(xmax, origin = "1970-01-01", tz = "UTC")
+    if (tick_by == "month") {
+      ticks = seq(as.POSIXct(format(t_min, "%Y-%m-01"), tz = "UTC"), t_max, by = "month")
+      lab = format(ticks, "%b", tz = "UTC")
+    } else {
+      ticks = seq(as.POSIXct(format(t_min, "%Y-%m-%d"), tz = "UTC"), t_max, by = "2 days")
+      lab = format(ticks, "%m-%d", tz = "UTC")
+    }
+    keep_tick = ticks >= t_min & ticks <= t_max
+    ticks = ticks[keep_tick]
+    lab = lab[keep_tick]
+    xlab = if (!length(ticks)) "" else paste(vapply(seq_along(ticks), function(i) {
+      sprintf('<text x="%.1f" y="236" text-anchor="middle" font-size="11" fill="#57534e">%s</text>',
+              svg_x(as.numeric(ticks[i]), xmin, xmax, sx0, sx1), lab[i])
+    }, ""), collapse = "")
+    sprintf(paste0(
+      '<svg viewBox="0 0 %d %d" role="img">',
+      grid_s, ylab_s, xlab,
+      '%s%s%s%s',
+      '</svg>'),
+      sw, sh,
+      svg_runs(x, y_true_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_true, "1.2"),
+      svg_runs(x, y_boost_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_boost, "2.2"),
+      svg_runs(x, y_obs_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_obs, "1.8", cls = "opt insitu", opacity = 0.55),
+      svg_runs(x, y_mod_v, xmin, xmax, ymin_s, ymax_s, sx0, sx1, sy0, sy1, col_mod, "1.8", cls = "opt awsom", opacity = 0.55))
+  }
+
+  x_all = as.numeric(tau)
+  recent = tau >= (max(tau) - 14 * 86400)
+  series_legend = paste0(legend_html(list(
+    list(color = col_true, label = "Observed Kp"),
+    list(color = col_boost, label = "Boosted")
+  )), toggle_btns())
+  chart_block = function(caption, note, svg) {
+    paste0("<figure><figcaption>", html_escape(caption),
+           "</figcaption><p>", html_escape(note), "</p>", series_legend, svg, "</figure>")
+  }
+  charts = paste0(
+    chart_block("6 hours ahead, whole test period",
+                "Each point is a forecast that was issued in the past. Gray is the Kp that was later observed. Green is Boosted. The buttons add the in-situ and AWSoM forecasts. This chart is the 3-hour period that ends 6 hours after the forecast was issued.",
+                series_svg(x_all, y_true[, 2], base$y24o[, 2], base$y24m[, 2], base$yboost[, 2], "month")),
+    chart_block("6 hours ahead, last 14 days",
+                "The same 6-hour chart, kept to the latest 14 days so the rises and falls are easier to see.",
+                series_svg(as.numeric(tau[recent]), y_true[recent, 2], base$y24o[recent, 2], base$y24m[recent, 2], base$yboost[recent, 2], "day")),
+    chart_block("24 hours ahead, whole test period",
+                "Each point is a forecast issued in the past, for the 3-hour period that ends a day later. The forecast usually peaks about 18 hours after the observed Kp, because it only knows conditions at the moment it is issued, not the solar wind that arrives the next day.",
+                series_svg(x_all, y_true[, 8], base$y24o[, 8], base$y24m[, 8], base$yboost[, 8], "month")),
+    chart_block("24 hours ahead, last 14 days",
+                "The same 24-hour chart, kept to the latest 14 days.",
+                series_svg(as.numeric(tau[recent]), y_true[recent, 8], base$y24o[recent, 8], base$y24m[recent, 8], base$yboost[recent, 8], "day"))
+  )
+
+  ord = order(tau, decreasing = TRUE)
+  take = ord[recent[ord]]
+  fmt_cell = function(x) if (!is.finite(x)) "" else fmt_num(x, 3)
+  recent_rows = paste(vapply(take, function(i) {
+    sprintf("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+            html_escape(fmt_utc(tau[i])),
+            html_escape(fmt_utc(tau[i] + 24 * 3600)),
+            fmt_num(y_true[i, 8], 3), fmt_cell(base$y24o[i, 8]),
+            fmt_cell(base$y24m[i, 8]), fmt_cell(base$yboost[i, 8]),
+            fmt_num(pers[i], 3))
+  }, ""), collapse = "\n")
+
+  by_lead = metrics[order(metrics$lead_end_hr, match(metrics$input, order_in)), ]
+  n_iss = length(tau)
+  page = paste0(
+    '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    '<title>Kp baseline</title><style>',
+    page_css(paste0(
+      'th:nth-child(2),td:nth-child(2){text-align:left;}',
+      'figure{margin:0 0 14px;background:#fff;border:1px solid #e7e5e4;border-radius:10px;padding:8px 10px 4px;min-width:0;}',
+      'figcaption{font-size:15px;color:#1c1917;font-weight:600;margin-bottom:2px;}',
+      'figure p{margin:0 0 4px;font-size:13px;}'
+    )),
+    '</style></head><body><main>',
+    '<nav><a href="VARX_Kp_realtime.html">Realtime</a><span class="here">Baseline</span></nav>',
+    '<h1>Kp baseline</h1>',
+    '<p>Same model as the realtime page, scored only where the 24-hour target Kp has already been observed. ',
+    'The model is a 24-hour VARX. Besides the previous 24 hours, it uses Kp and mean speed from a lag of 25 to 29 days chosen by the last 5 days of speed. ',
+    'The same lags also supply the Kp growth over the following 24 hours, averaged with weights from how well each window matches the shape of the last 48 hours of Kp. ',
+    'In-situ measurements are the hourly mean of the measured solar wind, with no adjustment. ',
+    'The AWSoM Earth model is the hourly mean of the realtime AWSoM run after OMNI = a + b * AWSoM. ',
+    'For each issue that map is refit on the latest 30 days of AWSoM-OMNI pairs that ended before the driver window. ',
+    'Kp history is shared and is not adjusted. ',
+    'Boosted starts from the in-situ forecast. When the last observed Kp is already high, it blends in the AWSoM forecast, because during those storms the in-situ forecast stays high for too long. ',
+    'The Kp level and the blend are chosen from earlier issues of the same lead, and only if that blend had a lower error there. ',
+    'The charts show Boosted. The buttons add the in-situ and AWSoM lines. ',
+    'Issues whose driver starts before ', html_escape(fmt_utc(base$cal_end)),
+    ' are omitted, because that first month is only long enough to fit the map.</p>',
+    '<div class="meta">',
+    '<div>Scored issues<b>', n_iss, '</b></div>',
+    '<div>First issue UTC<b>', html_escape(fmt_utc(min(tau))), '</b></div>',
+    '<div>Last issue UTC<b>', html_escape(fmt_utc(max(tau))), '</b></div>',
+    '<div>Page generated UTC<b>', html_escape(generated_at), '</b></div>',
+    '</div>',
+    '<p>Persistence repeats the last observed Kp. Skill = 1 - RMSE / RMSE of persistence. ',
+    'Positive skill is better than persistence. The endpoint is the Kp bin that ends exactly 24 hours after issue time.</p>',
+    '<h2>Endpoint criteria</h2>',
+    '<div class="wrap"><table><thead><tr>',
+    '<th>Lead</th><th>Input</th><th>n</th><th>RMSE</th><th>MAE</th><th>Correlation</th><th>Skill</th>',
+    '</tr></thead><tbody>', metric_rows(endpoint), '</tbody></table></div>',
+    bar_svg,
+    '<h2>Criteria by lead</h2>',
+    '<p>Leads of the 24-hour forecast, from 3 hours through 24 hours. At leads where blending AWSoM did not lower error on earlier issues, Boosted matches the in-situ forecast.</p>',
+    '<div class="wrap scroll"><table><thead><tr>',
+    '<th>Lead</th><th>Input</th><th>n</th><th>RMSE</th><th>MAE</th><th>Correlation</th><th>Skill</th>',
+    '</tr></thead><tbody>', metric_rows(by_lead), '</tbody></table></div>',
+    '<h2>Endpoint versus observed Kp</h2>',
+    charts,
+    '<h2>Scored issues, last 14 days</h2>',
+    '<p>Observed is the Kp that was later recorded for the bin ending 24 hours after issue time. ',
+    'In-situ measurements and the AWSoM Earth model are the forecasts issued at that time, using only data available then.</p>',
+    '<div class="wrap scroll"><table><thead><tr>',
+    '<th>Issue UTC</th><th>24h bin end</th><th>Observed</th><th>', lab_meas, '</th><th>', lab_awso, '</th><th>', lab_boost, '</th><th>Persistence</th>',
+    '</tr></thead><tbody>', recent_rows, '</tbody></table></div>',
+    if (is.null(outlook_eval)) "" else paste0(
+      "<!-- outlook-27-start -->", outlook_baseline_section(outlook_eval), "<!-- outlook-27-end -->"),
+    chart_script(),
+    '</main></body></html>'
+  )
+  write_html(path, page)
+}
