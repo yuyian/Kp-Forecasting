@@ -109,7 +109,10 @@ How each piece is built
 
    * Download the RTSW Earth in-situ series and the AWSoM run.
    * Turn non-finite values and fill sentinels into missing values, interpolate
-     onto a 1-minute grid, and average each clock hour.
+     onto a 1-minute grid, and average each clock hour. A missing hour that
+     sits between two hours already known at the issue is filled by linear
+     interpolation. If the series has stopped, the last hour is held for at
+     most 3 hours, so one finished Kp bin can still be used.
    * Extend Kp after the processed file from NOAA planetary Kp only. Only
      ended bins are used, rounded to the nearest third.
    * Load or fit the 24-hour VARX above.
@@ -119,8 +122,8 @@ How each piece is built
    The two inputs are:
 
    * In-situ measurements: the hourly mean of Earth_obs, with no adjustment.
-     If any hour has no real sample, is after the last real observation, or
-     is not finite, that whole driver is dropped.
+     A gap of a few hours is interpolated or held, as above. A longer gap
+     drops that issue.
    * AWSoM Earth model: the hourly mean of Earth_model, then
      OMNI = a + b * AWSoM. For each issue, a and b are fit on the latest 30
      days of paired hours that ended before this driver starts. Hours that

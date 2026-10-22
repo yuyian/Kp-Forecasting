@@ -180,11 +180,80 @@ make_rtsw_hourly = function(path) {
   list(time = hours, mat = out, n_native = n_native,
        native_start = min(time), native_end = max(time))
 }
+# Hours inside the driver that are missing. A gap with a known hour on both
+# sides is linear interpolation. Those hours have to have ended by the issue,
+# so a sample after tau is not used. If the series has already stopped, the
+# last hour is held for at most one Kp bin. That is what lets a finished Kp
+# bin be used when AWSoM or in-situ is a few hours behind.
+causal_solar_wind = function(hour_num, series_time, series_mat, hold_hr) {
+  # A vector is one issue, oldest hour first. A matrix is issues by hours.
+  if (is.null(dim(hour_num))) {
+    hour_mat = matrix(as.numeric(hour_num), nrow = 1)
+  } else {
+    hour_mat = matrix(as.numeric(hour_num), nrow(hour_num), ncol(hour_num))
+  }
+  know_row = apply(hour_mat, 1, max)
+  know = rep(know_row, times = ncol(hour_mat))
+  h = as.vector(hour_mat)
+  st = as.numeric(series_time)
+  out = matrix(NA_real_, length(h), ncol(series_mat))
+  colnames(out) = colnames(series_mat)
+  hold_sec = hold_hr * 3600
+  for (j in seq_len(ncol(series_mat))) {
+    ok = is.finite(series_mat[, j])
+    if (!any(ok)) next
+    sx = st[ok]
+    sy = series_mat[ok, j]
+    ord = order(sx)
+    sx = sx[ord]
+    sy = sy[ord]
+    ix = match(h, sx)
+    hit = !is.na(ix)
+    out[hit, j] = sy[ix[hit]]
+    miss = which(!hit)
+    if (!length(miss)) next
+    prev = findInterval(h[miss], sx)
+    has_prev = prev >= 1L
+    has_next = prev < length(sx)
+    prev_t = rep(NA_real_, length(miss))
+    next_t = prev_t
+    prev_t[has_prev] = sx[prev[has_prev]]
+    next_i = prev + 1L
+    next_t[has_next] = sx[next_i[has_next]]
+    can_interp = has_prev & has_next & next_t <= know[miss]
+    can_interp[is.na(can_interp)] = FALSE
+    can_hold = has_prev & !can_interp & (h[miss] - prev_t) <= hold_sec &
+      (h[miss] - prev_t) > 0 & h[miss] <= know[miss]
+    can_hold[is.na(can_hold)] = FALSE
+    ii = which(can_interp)
+    if (length(ii)) {
+      w = (h[miss][ii] - prev_t[ii]) / (next_t[ii] - prev_t[ii])
+      out[miss[ii], j] = (1 - w) * sy[prev[ii]] + w * sy[next_i[ii]]
+    }
+    ii = which(can_hold)
+    if (length(ii)) out[miss[ii], j] = sy[prev[ii]]
+  }
+  out
+}
 
 if (!score_outlook_only) {
 cat("Reducing RTSW obs and model to hourly means\n")
 obs_h = make_rtsw_hourly(obs_path)
 model_h = make_rtsw_hourly(model_path)
+# The lag match reads the same hourly series. Hold the last complete hour for
+# one Kp bin so a finished bin is not dropped when the feed is a few hours short.
+hold_series_tail = function(h, hold_hr) {
+  ok = apply(h$mat, 1, function(r) all(is.finite(r)))
+  if (!any(ok) || hold_hr < 1L) return(h)
+  last = max(which(ok))
+  add = seq_len(hold_hr)
+  h$time = c(h$time, h$time[last] + add * 3600)
+  h$mat = rbind(h$mat, h$mat[rep(last, hold_hr), , drop = FALSE])
+  h$n_native = c(h$n_native, integer(hold_hr))
+  h
+}
+obs_h = hold_series_tail(obs_h, kp_step_hr)
+model_h = hold_series_tail(model_h, kp_step_hr)
 obs_real = obs_h$n_native > 0 & apply(obs_h$mat, 1, function(r) all(is.finite(r)))
 if (!any(obs_real)) stop("RTSW obs has no hour with a real sample.")
 last_obs = max(obs_h$time[obs_real])
@@ -1053,26 +1122,24 @@ build_driver = function(i_live, input) {
   tau = kp_time_live[i_live] + kp_step_hr * 3600
   hours = as.POSIXct(as.numeric(tau) - (history_hr:1L) * 3600,
                      origin = "1970-01-01", tz = "UTC")
-  io = match(as.numeric(hours), as.numeric(obs_h$time))
-  im = match(as.numeric(hours), as.numeric(model_h$time))
-  used = matrix(NA_real_, length(hours), length(omni_features))
-  colnames(used) = omni_features
-  n_native = integer(length(hours))
-  ab = NULL
-  for (a in seq_along(hours)) {
-    if (input == "Earth_obs") {
-      if (is.na(io[a]) || hours[a] > last_obs) return(NULL)
-      row = obs_h$mat[io[a], ]
-      if (!all(is.finite(row))) return(NULL)
-      used[a, ] = row
-      n_native[a] = obs_h$n_native[io[a]]
-    } else {
-      if (is.na(im[a]) || !all(is.finite(model_h$mat[im[a], ]))) return(NULL)
-      if (is.null(ab)) ab = affine_updated(tau - history_hr * 3600)
-      used[a, ] = ab$a + ab$b * model_h$mat[im[a], ]
-      n_native[a] = model_h$n_native[im[a]]
-    }
+  if (input == "Earth_obs") {
+    used = causal_solar_wind(hours, obs_h$time, obs_h$mat, kp_step_hr)
+    src_n = obs_h$n_native
+    src_t = obs_h$time
+  } else {
+    raw = causal_solar_wind(hours, model_h$time, model_h$mat, kp_step_hr)
+    if (!all(is.finite(raw))) return(NULL)
+    ab = affine_updated(tau - history_hr * 3600)
+    used = sweep(raw, 2, ab$b, "*")
+    used = sweep(used, 2, ab$a, "+")
+    src_n = model_h$n_native
+    src_t = model_h$time
   }
+  if (!all(is.finite(used))) return(NULL)
+  ix = match(as.numeric(hours), as.numeric(src_t))
+  n_native = integer(length(hours))
+  known = !is.na(ix)
+  n_native[known] = src_n[ix[known]]
   list(input = input, tau = tau, hours = hours, used = used, n_native = n_native)
 }
 
@@ -1240,25 +1307,31 @@ score_baseline = function() {
 
   ages = history_hr:1L
   hour_num = outer(as.numeric(tau), ages * 3600, "-")
-  io = match(as.vector(hour_num), as.numeric(obs_h$time))
-  im = match(as.vector(hour_num), as.numeric(model_h$time))
-  dim(io) = dim(hour_num)
-  dim(im) = dim(hour_num)
-  obs_hour_ok = apply(obs_h$mat, 1, function(r) all(is.finite(r))) & obs_h$time <= last_obs
-  model_hour_ok = apply(model_h$mat, 1, function(r) all(is.finite(r)))
-  cell_ok = function(ix, hour_ok) {
-    filled = ix
-    filled[is.na(filled)] = 1L
-    ok = hour_ok[filled]
-    dim(ok) = dim(ix)
-    ok[is.na(ix)] = FALSE
-    rowSums(ok) == ncol(ix)
-  }
-  keep = cell_ok(io, obs_hour_ok) & cell_ok(im, model_hour_ok)
+  raw_obs = causal_solar_wind(hour_num, obs_h$time, obs_h$mat, kp_step_hr)
+  raw_mod = causal_solar_wind(hour_num, model_h$time, model_h$mat, kp_step_hr)
+  obs_ok = matrix(rowSums(is.finite(raw_obs)) == ncol(raw_obs), nrow(hour_num), ncol(hour_num))
+  mod_ok = matrix(rowSums(is.finite(raw_mod)) == ncol(raw_mod), nrow(hour_num), ncol(hour_num))
+  # In-situ hours after the last real sample are only the short hold. Do not
+  # score an issue whose driver reaches past that last real hour.
+  obs_time = matrix(hour_num, nrow(hour_num), ncol(hour_num))
+  live_tail = rowSums(obs_time > as.numeric(last_obs)) > 0
+  keep = rowSums(obs_ok) == ncol(hour_num) & rowSums(mod_ok) == ncol(hour_num) & !live_tail
   i_keep = i_cand[keep]
   tau_keep = tau[keep]
-  io = io[keep, , drop = FALSE]
-  im = im[keep, , drop = FALSE]
+  raw_obs = matrix(raw_obs, nrow(hour_num) * ncol(hour_num), ncol(raw_obs))
+  raw_mod = matrix(raw_mod, nrow(hour_num) * ncol(hour_num), ncol(raw_mod))
+  # Rebuild as issue x hour after the keep filter. causal_solar_wind stored
+  # hours in column-major order, one column of hour_num at a time.
+  take = function(raw) {
+    cols = vector("list", length(omni_features))
+    for (f in seq_along(omni_features)) {
+      m = matrix(raw[, f], nrow(hour_num), ncol(hour_num))
+      cols[[f]] = m[keep, , drop = FALSE]
+    }
+    cols
+  }
+  obs_cols = take(raw_obs)
+  mod_cols = take(raw_mod)
   if (!length(i_keep))
     stop("No issue time has a complete 24 h window in both Earth_obs and Earth_model.")
 
@@ -1269,32 +1342,30 @@ score_baseline = function() {
   finite_row = rowSums(is.finite(kp_hist_mat)) == n_kp_hist & rowSums(is.finite(y_true)) == n24
   i_keep = i_keep[finite_row]
   tau_keep = tau_keep[finite_row]
-  io = io[finite_row, , drop = FALSE]
-  im = im[finite_row, , drop = FALSE]
+  obs_cols = lapply(obs_cols, function(m) m[finite_row, , drop = FALSE])
+  mod_cols = lapply(mod_cols, function(m) m[finite_row, , drop = FALSE])
   kp_hist_mat = kp_hist_mat[finite_row, , drop = FALSE]
   y_true = y_true[finite_row, , drop = FALSE]
   if (!length(i_keep)) stop("Scored issues have non-finite Kp history or targets.")
 
-  exog_from = function(hour_index, mat) {
-    ex = matrix(NA_real_, nrow(hour_index), ncol(hour_index) * length(omni_features))
+  exog_from_cols = function(cols) {
+    ex = matrix(NA_real_, nrow(cols[[1]]), ncol(cols[[1]]) * length(cols))
     col0 = 1L
-    for (f in seq_along(omni_features)) {
-      vals = mat[as.vector(hour_index), f]
-      dim(vals) = dim(hour_index)
-      ex[, col0:(col0 + ncol(hour_index) - 1L)] = vals
-      col0 = col0 + ncol(hour_index)
+    for (f in seq_along(cols)) {
+      ex[, col0:(col0 + ncol(cols[[f]]) - 1L)] = cols[[f]]
+      col0 = col0 + ncol(cols[[f]])
     }
     ex
   }
-  ex_obs = exog_from(io, obs_h$mat)
-  ex_mod = matrix(NA_real_, nrow(im), ncol(im) * length(omni_features))
-  scale_vs = matrix(NA_real_, nrow(im), 2)
-  for (i in seq_len(nrow(im))) {
+  ex_obs = exog_from_cols(obs_cols)
+  ex_mod = matrix(NA_real_, length(i_keep), history_hr * length(omni_features))
+  scale_vs = matrix(NA_real_, length(i_keep), 2)
+  for (i in seq_len(length(i_keep))) {
     ab = affine_updated(tau_keep[i] - history_hr * 3600)
     scale_vs[i, ] = c(ab$a[vs_col], ab$b[vs_col])
     col0 = 1L
     for (f in seq_along(omni_features)) {
-      ex_mod[i, col0:(col0 + history_hr - 1L)] = ab$a[f] + ab$b[f] * model_h$mat[im[i, ], f]
+      ex_mod[i, col0:(col0 + history_hr - 1L)] = ab$a[f] + ab$b[f] * mod_cols[[f]][i, ]
       col0 = col0 + history_hr
     }
   }
