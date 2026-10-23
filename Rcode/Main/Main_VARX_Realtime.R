@@ -10,8 +10,9 @@
 # -------------
 # RTSW Earth series (obs and model) from
 #   https://solarwind.engin.umich.edu/rtsw/api/series/?t=earth
-# Bins after that file come from one source, NOAA planetary Kp, rounded to
-# the nearest third. The GFZ nowcast is not mixed in. Training Kp is unchanged.
+# Bins after that file come from NOAA planetary Kp, rounded to the nearest
+# third. A bin NOAA no longer has is filled from the GFZ nowcast. A bin
+# neither source has is left missing. Training Kp is unchanged.
 #
 # The issued 24 h forecast is one VARX. In-situ and AWSoM share that model;
 # only the solar-wind block changes. Besides the previous 24 hours, it uses
@@ -306,10 +307,10 @@ affine_updated = function(cutoff) {
 cat(sprintf("AWSoM–OMNI pairs available through %s\n",
             fmt_utc(max(model_h$time[elig_ix]))))
 
-# ---- extend Kp from NOAA only, without touching the training series --------
-# Training keeps Data/Processed/Kp.csv. Every run rebuilds the bins that
-# start after that file from NOAA planetary Kp. Bins in the file are not
-# overwritten. A bin that has not ended is not used.
+# ---- extend Kp after the file, without touching the training series -------
+# Training keeps Data/Processed/Kp.csv. Bins in the file are not overwritten.
+# A missing bin is filled from NOAA, then from the GFZ nowcast. A bin that
+# neither source has, or that has not ended, stays missing.
 read_noaa_kp = function() {
   noaa_tmp = tempfile(fileext = ".json")
   on.exit(unlink(noaa_tmp), add = TRUE)
@@ -330,21 +331,70 @@ read_noaa_kp = function() {
   if (!length(ended)) return(NULL)
   data.frame(start = start[ended], kp = kp[ended], stringsAsFactors = FALSE)
 }
+read_gfz_kp = function() {
+  tmp = tempfile(fileext = ".txt")
+  on.exit(unlink(tmp), add = TRUE)
+  ok = tryCatch({
+    curl_to("https://kp.gfz.de/app/files/Kp_ap_Ap_SN_F107_nowcast.txt",
+            tmp, c("--ipv4", "-A", "Mozilla/5.0"))
+    TRUE
+  }, error = function(e) FALSE)
+  if (!ok) return(NULL)
+  lines = readLines(tmp, warn = FALSE)
+  lines = lines[!grepl("^\\s*#", lines) & nzchar(trimws(lines))]
+  if (!length(lines)) return(NULL)
+  nw = tryCatch(read.table(text = lines, stringsAsFactors = FALSE), error = function(e) NULL)
+  if (is.null(nw) || ncol(nw) < 15L) return(NULL)
+  hour_head = seq(0, 21, by = kp_step_hr)
+  start = rep(as.POSIXct(NA), nrow(nw) * length(hour_head))
+  kp = rep(NA_real_, length(start))
+  n = 0L
+  for (r in seq_len(nrow(nw))) {
+    for (k in seq_along(hour_head)) {
+      val = nw[r, 7L + k]
+      if (!is.finite(val) || val < 0 || val > 9) next
+      t0 = as.POSIXct(sprintf("%04d-%02d-%02d %02d:00:00",
+                              nw[r, 1], nw[r, 2], nw[r, 3], hour_head[k]),
+                      format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+      if (is.na(t0) || t0 + kp_step_hr * 3600 > Sys.time()) next
+      n = n + 1L
+      start[n] = t0
+      kp[n] = round(val * 3) / 3
+    }
+  }
+  if (!n) return(NULL)
+  data.frame(start = start[seq_len(n)], kp = kp[seq_len(n)], stringsAsFactors = FALSE)
+}
 refresh_noaa_tail = function() {
   noaa = read_noaa_kp()
-  if (is.null(noaa)) return(list(ok = FALSE, updated = 0L, added = 0L))
-  noaa = noaa[noaa$start > kp_file_end, , drop = FALSE]
-  if (!nrow(noaa)) return(list(ok = TRUE, updated = 0L, added = 0L))
+  gfz = read_gfz_kp()
+  if (is.null(noaa) && is.null(gfz))
+    return(list(ok = FALSE, updated = 0L, added = 0L, from_gfz = 0L, open = 0L))
+  last_set = c(
+    if (!is.null(noaa) && nrow(noaa)) as.numeric(max(noaa$start)),
+    if (!is.null(gfz) && nrow(gfz)) as.numeric(max(gfz$start))
+  )
+  last_set = last_set[is.finite(last_set) & last_set > as.numeric(kp_file_end)]
+  if (!length(last_set))
+    return(list(ok = TRUE, updated = 0L, added = 0L, from_gfz = 0L, open = 0L))
   updated = 0L
   added = 0L
+  from_gfz = 0L
+  open = 0L
   step = kp_step_hr * 3600
   t = kp_file_end + step
-  last = max(noaa$start)
-  # NOAA keeps only a short recent window, so the first bin can be more than
-  # one step after the file. Keep the 3-hour grid and leave the hole missing.
-  while (as.numeric(t) <= as.numeric(last) + 1) {
-    j = match(as.numeric(t), as.numeric(noaa$start))
-    val = if (is.na(j)) NA_real_ else noaa$kp[j]
+  last = max(last_set)
+  while (as.numeric(t) <= last + 1) {
+    jn = if (is.null(noaa)) NA_integer_ else match(as.numeric(t), as.numeric(noaa$start))
+    jg = if (is.null(gfz)) NA_integer_ else match(as.numeric(t), as.numeric(gfz$start))
+    val = NA_real_
+    used_gfz = FALSE
+    if (!is.na(jn)) {
+      val = noaa$kp[jn]
+    } else if (!is.na(jg)) {
+      val = gfz$kp[jg]
+      used_gfz = TRUE
+    }
     k = match(as.numeric(t), as.numeric(kp_time_live))
     if (!is.na(k)) {
       if (is.finite(val) && !isTRUE(all.equal(kp_value_live[k], val))) {
@@ -356,9 +406,11 @@ refresh_noaa_tail = function() {
       kp_value_live <<- c(kp_value_live, val)
       added = added + 1L
     }
+    if (used_gfz && is.finite(val)) from_gfz = from_gfz + 1L
+    if (!is.finite(val)) open = open + 1L
     t = t + step
   }
-  list(ok = TRUE, updated = updated, added = added)
+  list(ok = TRUE, updated = updated, added = added, from_gfz = from_gfz, open = open)
 }
 kp_time_live = kp_time
 kp_value_live = kp_value
@@ -369,9 +421,16 @@ noaa_tail = refresh_noaa_tail()
 if (isTRUE(noaa_tail$ok)) {
   last_i = length(kp_time_live)
   kp_extend_source = "NOAA"
+  fill_note = ""
+  if (noaa_tail$from_gfz > 0L)
+    fill_note = paste0(fill_note, sprintf(
+      " %d bins missing from NOAA were filled from the GFZ nowcast.", noaa_tail$from_gfz))
+  if (noaa_tail$open > 0L)
+    fill_note = paste0(fill_note, sprintf(
+      " %d bins are still missing and are left open.", noaa_tail$open))
   nowcast_note = sprintf(
-    "Kp source is NOAA planetary Kp. Refreshed %d bins after %s and appended %d, rounded to the nearest third. Latest ended bin %s to %s, Kp %.3f. Training Kp is unchanged.",
-    noaa_tail$updated, fmt_utc(kp_file_end), noaa_tail$added,
+    "Kp after %s is NOAA planetary Kp, rounded to the nearest third.%s Latest ended bin %s to %s, Kp %.3f. Training Kp is unchanged.",
+    fmt_utc(kp_file_end), fill_note,
     fmt_utc(kp_time_live[last_i]),
     fmt_utc(kp_time_live[last_i] + kp_step_hr * 3600),
     kp_value_live[last_i])

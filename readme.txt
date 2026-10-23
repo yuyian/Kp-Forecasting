@@ -67,13 +67,13 @@ How each piece is built
    Kp is the GFZ 3-hour index, https://kp.gfz.de/en/data
    Raw files are in Data/Origin/Kp/. The processed file is
    Data/Processed/Kp.csv. Training Kp runs through about January 2026.
-   The realtime script uses one Kp source after that file: NOAA planetary Kp,
+   The realtime script uses NOAA planetary Kp after that file,
    https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json
    Only bins that have already ended are appended, and they are rounded to
-   the nearest third. Bins already in Kp.csv are left as they are. NOAA keeps
-   a short recent window, so a hole after the file stays empty and the later
-   bins are still used. The GFZ
-   nowcast is not mixed into this live history. Training labels are unchanged.
+   the nearest third. Bins already in Kp.csv are left as they are. A bin
+   that NOAA no longer carries is filled from the GFZ nowcast. A bin that
+   neither source has is left missing, and the charts do not connect across
+   it. Training labels are unchanged.
 
    OMNI is https://omniweb.gsfc.nasa.gov/ow_min.html
    The download is 1-minute data. Preprocessing interpolates it and then
