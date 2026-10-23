@@ -70,7 +70,9 @@ How each piece is built
    The realtime script uses one Kp source after that file: NOAA planetary Kp,
    https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json
    Only bins that have already ended are appended, and they are rounded to
-   the nearest third. Bins already in Kp.csv are left as they are. The GFZ
+   the nearest third. Bins already in Kp.csv are left as they are. NOAA keeps
+   a short recent window, so a hole after the file stays empty and the later
+   bins are still used. The GFZ
    nowcast is not mixed into this live history. Training labels are unchanged.
 
    OMNI is https://omniweb.gsfc.nasa.gov/ow_min.html

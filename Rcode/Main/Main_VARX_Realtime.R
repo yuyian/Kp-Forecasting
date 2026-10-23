@@ -104,11 +104,11 @@ floor_hour = function(t) {
   as.POSIXct(as.numeric(t) - (as.numeric(t) %% 3600), origin = "1970-01-01", tz = "UTC")
 }
 
-curl_to = function(url, dest) {
-  status = system2("curl", c("--max-time", "90", "-fsSL", url, "-o", dest))
+curl_to = function(url, dest, extra = character()) {
+  status = system2("curl", c("--max-time", "90", "-fsSL", extra, url, "-o", dest))
   if (!identical(status, 0L)) {
     message("Verified download failed; retrying without certificate check.")
-    status = system2("curl", c("--max-time", "90", "-kfsSL", url, "-o", dest))
+    status = system2("curl", c("--max-time", "90", "-kfsSL", extra, url, "-o", dest))
   }
   if (!identical(status, 0L)) stop("curl download failed for ", url, ", status ", status)
   invisible(dest)
@@ -313,10 +313,11 @@ cat(sprintf("AWSoM–OMNI pairs available through %s\n",
 read_noaa_kp = function() {
   noaa_tmp = tempfile(fileext = ".json")
   on.exit(unlink(noaa_tmp), add = TRUE)
-  ok = identical(system2("curl", c(
-    "--max-time", "25", "-fsSL", "-A", "Mozilla/5.0",
-    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
-    "-o", noaa_tmp)), 0L)
+  ok = tryCatch({
+    curl_to("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
+            noaa_tmp, c("-A", "Mozilla/5.0"))
+    TRUE
+  }, error = function(e) FALSE)
   if (!ok) return(NULL)
   noaa = tryCatch(jsonlite::fromJSON(noaa_tmp), error = function(e) NULL)
   if (is.null(noaa) || is.null(noaa$time_tag)) return(NULL)
@@ -325,32 +326,37 @@ read_noaa_kp = function() {
   ord = order(start)
   start = start[ord]
   kp = kp[ord]
-  ended = is.finite(kp) & kp >= 0 & kp <= 9 & start + kp_step_hr * 3600 <= Sys.time()
-  if (!any(ended)) return(NULL)
+  ended = which(is.finite(kp) & kp >= 0 & kp <= 9 & start + kp_step_hr * 3600 <= Sys.time())
+  if (!length(ended)) return(NULL)
   data.frame(start = start[ended], kp = kp[ended], stringsAsFactors = FALSE)
 }
 refresh_noaa_tail = function() {
   noaa = read_noaa_kp()
   if (is.null(noaa)) return(list(ok = FALSE, updated = 0L, added = 0L))
+  noaa = noaa[noaa$start > kp_file_end, , drop = FALSE]
+  if (!nrow(noaa)) return(list(ok = TRUE, updated = 0L, added = 0L))
   updated = 0L
   added = 0L
-  for (k in seq_len(nrow(noaa))) {
-    start = noaa$start[k]
-    val = noaa$kp[k]
-    if (start <= kp_file_end) next
-    j = match(as.numeric(start), as.numeric(kp_time_live))
-    if (!is.na(j)) {
-      if (!isTRUE(all.equal(kp_value_live[j], val))) {
-        kp_value_live[j] <<- val
+  step = kp_step_hr * 3600
+  t = kp_file_end + step
+  last = max(noaa$start)
+  # NOAA keeps only a short recent window, so the first bin can be more than
+  # one step after the file. Keep the 3-hour grid and leave the hole missing.
+  while (as.numeric(t) <= as.numeric(last) + 1) {
+    j = match(as.numeric(t), as.numeric(noaa$start))
+    val = if (is.na(j)) NA_real_ else noaa$kp[j]
+    k = match(as.numeric(t), as.numeric(kp_time_live))
+    if (!is.na(k)) {
+      if (is.finite(val) && !isTRUE(all.equal(kp_value_live[k], val))) {
+        kp_value_live[k] <<- val
         updated = updated + 1L
       }
-    } else if (length(kp_time_live) &&
-               abs(as.numeric(start - kp_time_live[length(kp_time_live)], units = "secs") -
-                   kp_step_hr * 3600) < 1) {
-      kp_time_live <<- c(kp_time_live, start)
+    } else {
+      kp_time_live <<- c(kp_time_live, t)
       kp_value_live <<- c(kp_value_live, val)
       added = added + 1L
     }
+    t = t + step
   }
   list(ok = TRUE, updated = updated, added = added)
 }
@@ -1147,8 +1153,11 @@ inputs = c("Earth_obs", "model_affine")
 i_live = length(kp_time_live)
 drivers_by_input = NULL
 while (i_live >= n_kp_hist) {
-  built = lapply(inputs, function(input) build_driver(i_live, input))
-  if (!any(vapply(built, is.null, logical(1)))) {
+  hist_ix = (i_live - n_kp_hist + 1L):i_live
+  hist_ok = all(is.finite(kp_value_live[hist_ix])) &&
+    all(abs(diff(as.numeric(kp_time_live[hist_ix])) - kp_step_hr * 3600) < 1)
+  built = if (!hist_ok) NULL else lapply(inputs, function(input) build_driver(i_live, input))
+  if (!is.null(built) && !any(vapply(built, is.null, logical(1)))) {
     drivers_by_input = setNames(built, inputs)
     break
   }
@@ -1542,10 +1551,11 @@ if (any(gfz_after)) {
   kp_chart_source = if (identical(kp_extend_source, "NOAA")) "NOAA" else "GFZ"
 } else {
   noaa_tmp = tempfile(fileext = ".json")
-  noaa_ok = identical(system2("curl", c(
-    "--max-time", "25", "-fsSL", "-A", "Mozilla/5.0",
-    "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
-    "-o", noaa_tmp)), 0L)
+  noaa_ok = tryCatch({
+    curl_to("https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
+            noaa_tmp, c("-A", "Mozilla/5.0"))
+    TRUE
+  }, error = function(e) FALSE)
   if (noaa_ok) {
     noaa = tryCatch(jsonlite::fromJSON(noaa_tmp), error = function(e) NULL)
     if (!is.null(noaa) && !is.null(noaa$time_tag)) {
