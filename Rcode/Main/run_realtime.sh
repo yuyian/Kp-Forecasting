@@ -34,6 +34,23 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK"' EXIT
 cd "$ROOT"
+# GitHub's own timer has not been creating runs. Start that run from here
+# when this script is the Mac job. Skip it inside GitHub Actions, or each
+# run would start another one.
+if [ -z "${GITHUB_ACTIONS:-}" ]; then
+  GH=""
+  for c in "$HOME/.local/bin/gh" /tmp/gh-cli/gh_2.103.0_macOS_arm64/bin/gh; do
+    if [ -x "$c" ]; then
+      GH=$c
+      break
+    fi
+  done
+  if [ -n "$GH" ] && "$GH" workflow run forecast.yml --repo yuyian/Kp-Forecasting; then
+    echo "Started the GitHub forecast."
+  else
+    echo "Could not start the GitHub forecast."
+  fi
+fi
 Rscript Rcode/Main/Main_VARX_Realtime.R
 FILES="
 VARX_Kp_realtime.html
@@ -56,7 +73,7 @@ publish_to() {
 publish_to "$PUBLISH"
 if [ "$SHARE" != "$PUBLISH" ]; then
   if [ -d "$(dirname "$SHARE")" ]; then
-    publish_to "$SHARE"
+    publish_to "$SHARE" || echo "Shared folder copy failed: $SHARE"
   else
     echo "Shared folder is not mounted, skipped: $SHARE"
   fi

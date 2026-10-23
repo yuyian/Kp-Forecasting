@@ -248,9 +248,10 @@ including coefficients, drivers, and the run log, stay in
 Rcode/Main/output/Main_VARX_Realtime/. The directory other people should
 open is publish/.
 
-GitHub Actions runs the same script every hour at minute 17 UTC. A new Kp
-bin is published on the next start after that bin ends. The laptop can be off.
-The workflow is .github/workflows/forecast.yml. It publishes publish/ with
+GitHub Actions is set to run the same script every hour at minute 17 UTC.
+That timer has not been creating runs. The Mac hourly job also starts the
+GitHub run, at minute 12, so the page updates while this computer is logged
+in. The workflow is .github/workflows/forecast.yml. It publishes publish/ with
 GitHub Pages. The page is
 
   https://yuyian.github.io/Kp-Forecasting/
@@ -260,9 +261,10 @@ started by hand from the Actions tab. The raw one-minute OMNI files are not
 in the git repository.
 
 On this Mac the hourly job is still a LaunchAgent. It runs at minute 12 of
-every hour while the user is logged in. If the Mac was asleep, the missed
-hour runs once after wake. The log is publish/cron.log. A lock stops a
-second run from starting while the first is still downloading.
+every hour while the user is logged in, and that start also launches the
+GitHub run. If the Mac was asleep, the missed hour runs once after wake.
+The log is publish/cron.log. A lock stops a second run from starting while
+the first is still downloading.
 
   cp Rcode/Main/local.kp-forecast.plist ~/Library/LaunchAgents/
   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/local.kp-forecast.plist
