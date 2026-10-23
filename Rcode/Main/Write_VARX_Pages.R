@@ -57,7 +57,15 @@ svg_runs = function(x, y, xmin, xmax, ymin, ymax, x0, x1, y0, y1, color, width,
   ok = is.finite(x) & is.finite(y)
   if (!any(ok)) return("")
   ix = which(ok)
-  run_id = cumsum(c(1L, diff(ix) != 1L))
+  gap = rep(FALSE, length(ix))
+  if (length(ix) > 1L) {
+    dx = diff(x[ix])
+    step = dx[is.finite(dx) & dx > 0]
+    # A missing stretch is wider than the usual spacing. Do not draw across it.
+    gap[-1L] = diff(ix) != 1L
+    if (length(step)) gap[-1L] = gap[-1L] | dx > min(step) * 1.5
+  }
+  run_id = cumsum(c(1L, gap[-1L]))
   dash_attr = if (dash) ' stroke-dasharray="6 3"' else ""
   class_attr = if (nzchar(cls)) sprintf(' class="%s"', cls) else ""
   hide = if (grepl("opt", cls, fixed = TRUE)) ' style="display:none"' else ""
