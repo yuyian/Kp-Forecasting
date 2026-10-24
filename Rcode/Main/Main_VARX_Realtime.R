@@ -243,6 +243,9 @@ obs_h = make_rtsw_hourly(obs_path)
 model_h = make_rtsw_hourly(model_path)
 # The lag match reads the same hourly series. Hold the last complete hour for
 # one Kp bin so a finished bin is not dropped when the feed is a few hours short.
+# A hole earlier in the series is filled inside the lag match, same rule as
+# the 24 h driver: interpolate when a later sample is already known, otherwise
+# leave it missing.
 hold_series_tail = function(h, hold_hr) {
   ok = apply(h$mat, 1, function(r) all(is.finite(r)))
   if (!any(ok) || hold_hr < 1L) return(h)
@@ -546,10 +549,26 @@ recur_batch = function(tau, i_kp, kp_src, kp_hist_mat, exog,
   n = length(tau)
   stopifnot(nrow(kp_hist_mat) == n, nrow(exog) == n)
   stopifnot(ncol(exog) == history_hr * length(omni_features))
-  recent = pull_hours(hours_ending(tau, match_hr), speed_time, speed_vs, speed_latest)
+  # A short hole in speed is filled the same way as the 24 h driver. Hours
+  # after speed_latest stay missing, so a sample that has not ended is not used.
+  pull_speed = function(hour_num, grid, values, latest) {
+    filled = causal_solar_wind(hour_num, grid, matrix(values, ncol = 1), kp_step_hr)
+    if (is.null(dim(hour_num))) {
+      out = matrix(filled, nrow = 1)
+    } else {
+      out = matrix(filled, nrow = nrow(hour_num), ncol = ncol(hour_num))
+    }
+    if (!is.null(latest)) {
+      bad = matrix(as.vector(hour_num) > as.numeric(latest),
+                   nrow = nrow(out), ncol = ncol(out))
+      out[bad] = NA_real_
+    }
+    out
+  }
+  recent = pull_speed(hours_ending(tau, match_hr), speed_time, speed_vs, speed_latest)
   cors = matrix(NA_real_, n, length(lags_hr))
   for (j in seq_along(lags_hr)) {
-    past = pull_hours(hours_ending(tau - lags_hr[j] * 3600, match_hr),
+    past = pull_speed(hours_ending(tau - lags_hr[j] * 3600, match_hr),
                       speed_time, speed_vs, speed_latest)
     okj = finite_rows(recent) & finite_rows(past)
     if (any(okj))
@@ -569,7 +588,7 @@ recur_batch = function(tau, i_kp, kp_src, kp_hist_mat, exog,
     good = ix >= 1L & ix <= length(kp_src)
     rkp[good, j] = kp_src[ix[good]]
   }
-  raw_vs = pull_hours(hours_ending(tau - best_lag * 3600, history_hr),
+  raw_vs = pull_speed(hours_ending(tau - best_lag * 3600, history_hr),
                       vs_time, vs_values, speed_latest)
   rvs = rowMeans(raw_vs)
   if (!is.null(scale_vs)) rvs = scale_vs[, 1] + scale_vs[, 2] * rvs
@@ -1217,8 +1236,36 @@ while (i_live >= n_kp_hist) {
     all(abs(diff(as.numeric(kp_time_live[hist_ix])) - kp_step_hr * 3600) < 1)
   built = if (!hist_ok) NULL else lapply(inputs, function(input) build_driver(i_live, input))
   if (!is.null(built) && !any(vapply(built, is.null, logical(1)))) {
-    drivers_by_input = setNames(built, inputs)
-    break
+    drivers_try = setNames(built, inputs)
+    kp_row = matrix(kp_value_live[hist_ix], nrow = 1)
+    tau_try = drivers_try[[1]]$tau
+    lag_ok = TRUE
+    for (input in inputs) {
+      driver = drivers_try[[input]]
+      exog = matrix(as.vector(driver$used), nrow = 1)
+      if (input == "Earth_obs") {
+        rb = recur_batch(tau_try, i_live, kp_value_live, kp_row, exog,
+                         obs_h$time, obs_h$mat[, vs_col],
+                         obs_h$time, obs_h$mat[, vs_col],
+                         speed_latest = last_obs)
+      } else {
+        ab_now = affine_updated(tau_try - history_hr * 3600)
+        rb = recur_batch(tau_try, i_live, kp_value_live, kp_row, exog,
+                         model_h$time, model_h$mat[, vs_col],
+                         model_h$time, model_h$mat[, vs_col],
+                         scale_vs = matrix(c(ab_now$a[vs_col], ab_now$b[vs_col]), nrow = 1))
+      }
+      if (!isTRUE(rb$ok)) {
+        cat(sprintf("Lag features are still incomplete for %s at %s. Trying the previous issue.\n",
+                    input, fmt_utc(tau_try)))
+        lag_ok = FALSE
+        break
+      }
+    }
+    if (lag_ok) {
+      drivers_by_input = drivers_try
+      break
+    }
   }
   i_live = i_live - 1L
 }
