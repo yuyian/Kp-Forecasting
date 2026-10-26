@@ -11,8 +11,8 @@
 # RTSW Earth series (obs and model) from
 #   https://solarwind.engin.umich.edu/rtsw/api/series/?t=earth
 # Bins after that file come from NOAA planetary Kp, rounded to the nearest
-# third. A bin NOAA no longer has is filled from the GFZ nowcast. Training
-# Kp is unchanged.
+# third. A bin NOAA no longer has is filled from the GFZ nowcast. A bin
+# neither source has is left missing. Training Kp is unchanged.
 #
 # The issued forecast is the better model at each range. The next 24 hours are
 # the original vanilla XGBoost, loaded by Issue_Best.R. From 27 hours through
@@ -313,10 +313,10 @@ affine_updated = function(cutoff) {
 cat(sprintf("AWSoM–OMNI pairs available through %s\n",
             fmt_utc(max(model_h$time[elig_ix]))))
 
-# ---- extend Kp from NOAA only, without touching the training series --------
-# Training keeps Data/Processed/Kp.csv. Every run rebuilds the bins that
-# start after that file from NOAA planetary Kp. Bins in the file are not
-# overwritten. A bin that has not ended is not used.
+# ---- extend Kp after the file, without touching the training series -------
+# Training keeps Data/Processed/Kp.csv. Bins in the file are not overwritten.
+# A missing bin is filled from NOAA, then from the GFZ nowcast. A bin that
+# neither source has, or that has not ended, stays missing.
 read_noaa_kp = function() {
   noaa_tmp = tempfile(fileext = ".json")
   on.exit(unlink(noaa_tmp), add = TRUE)
@@ -375,17 +375,18 @@ refresh_noaa_tail = function() {
   noaa = read_noaa_kp()
   gfz = read_gfz_kp()
   if (is.null(noaa) && is.null(gfz))
-    return(list(ok = FALSE, updated = 0L, added = 0L, from_gfz = 0L))
+    return(list(ok = FALSE, updated = 0L, added = 0L, from_gfz = 0L, open = 0L))
   last_set = c(
     if (!is.null(noaa) && nrow(noaa)) as.numeric(max(noaa$start)),
     if (!is.null(gfz) && nrow(gfz)) as.numeric(max(gfz$start))
   )
   last_set = last_set[is.finite(last_set) & last_set > as.numeric(kp_file_end)]
   if (!length(last_set))
-    return(list(ok = TRUE, updated = 0L, added = 0L, from_gfz = 0L))
+    return(list(ok = TRUE, updated = 0L, added = 0L, from_gfz = 0L, open = 0L))
   updated = 0L
   added = 0L
   from_gfz = 0L
+  open = 0L
   step = kp_step_hr * 3600
   t = kp_file_end + step
   last = max(last_set)
@@ -412,9 +413,10 @@ refresh_noaa_tail = function() {
       added = added + 1L
     }
     if (used_gfz && is.finite(val)) from_gfz = from_gfz + 1L
+    if (!is.finite(val)) open = open + 1L
     t = t + step
   }
-  list(ok = TRUE, updated = updated, added = added, from_gfz = from_gfz)
+  list(ok = TRUE, updated = updated, added = added, from_gfz = from_gfz, open = open)
 }
 kp_time_live = kp_time
 kp_value_live = kp_value
@@ -427,10 +429,14 @@ if (isTRUE(noaa_tail$ok)) {
   kp_extend_source = "NOAA"
   fill_note = ""
   if (noaa_tail$from_gfz > 0L)
-    fill_note = sprintf(" %d bins missing from NOAA were filled from the GFZ nowcast.", noaa_tail$from_gfz)
+    fill_note = paste0(fill_note, sprintf(
+      " %d bins missing from NOAA were filled from the GFZ nowcast.", noaa_tail$from_gfz))
+  if (noaa_tail$open > 0L)
+    fill_note = paste0(fill_note, sprintf(
+      " %d bins are still missing and are left open.", noaa_tail$open))
   nowcast_note = sprintf(
-    "Kp source is NOAA planetary Kp. Refreshed %d bins after %s and appended %d, rounded to the nearest third.%s Latest ended bin %s to %s, Kp %.3f. Training Kp is unchanged.",
-    noaa_tail$updated, fmt_utc(kp_file_end), noaa_tail$added, fill_note,
+    "Kp after %s is NOAA planetary Kp, rounded to the nearest third.%s Latest ended bin %s to %s, Kp %.3f. Training Kp is unchanged.",
+    fmt_utc(kp_file_end), fill_note,
     fmt_utc(kp_time_live[last_i]),
     fmt_utc(kp_time_live[last_i] + kp_step_hr * 3600),
     kp_value_live[last_i])
@@ -1233,21 +1239,34 @@ while (i_live >= n_kp_hist) {
     all(abs(diff(as.numeric(kp_time_live[hist_ix])) - kp_step_hr * 3600) < 1)
   built = if (!hist_ok) NULL else lapply(inputs, function(input) build_driver(i_live, input))
   if (!is.null(built) && !any(vapply(built, is.null, logical(1)))) {
-    tau_try = built[[1]]$tau
-    kp_try = matrix(kp_value_live[hist_ix], nrow = 1)
-    ex_obs = matrix(as.vector(built[[1]]$used), nrow = 1)
-    ex_model = matrix(as.vector(built[[2]]$used), nrow = 1)
-    ab_try = affine_updated(tau_try - history_hr * 3600)
-    ok_obs = isTRUE(recur_batch(tau_try, i_live, kp_value_live, kp_try, ex_obs,
-                                obs_h$time, obs_h$mat[, vs_col],
-                                obs_h$time, obs_h$mat[, vs_col],
-                                speed_latest = last_obs)$ok)
-    ok_model = isTRUE(recur_batch(tau_try, i_live, kp_value_live, kp_try, ex_model,
-                                  model_h$time, model_h$mat[, vs_col],
-                                  model_h$time, model_h$mat[, vs_col],
-                                  scale_vs = matrix(c(ab_try$a[vs_col], ab_try$b[vs_col]), nrow = 1))$ok)
-    if (ok_obs && ok_model) {
-      drivers_by_input = setNames(built, inputs)
+    drivers_try = setNames(built, inputs)
+    kp_row = matrix(kp_value_live[hist_ix], nrow = 1)
+    tau_try = drivers_try[[1]]$tau
+    lag_ok = TRUE
+    for (input in inputs) {
+      driver = drivers_try[[input]]
+      exog = matrix(as.vector(driver$used), nrow = 1)
+      if (input == "Earth_obs") {
+        rb = recur_batch(tau_try, i_live, kp_value_live, kp_row, exog,
+                         obs_h$time, obs_h$mat[, vs_col],
+                         obs_h$time, obs_h$mat[, vs_col],
+                         speed_latest = last_obs)
+      } else {
+        ab_now = affine_updated(tau_try - history_hr * 3600)
+        rb = recur_batch(tau_try, i_live, kp_value_live, kp_row, exog,
+                         model_h$time, model_h$mat[, vs_col],
+                         model_h$time, model_h$mat[, vs_col],
+                         scale_vs = matrix(c(ab_now$a[vs_col], ab_now$b[vs_col]), nrow = 1))
+      }
+      if (!isTRUE(rb$ok)) {
+        cat(sprintf("Lag features are still incomplete for %s at %s. Trying the previous issue.\n",
+                    input, fmt_utc(tau_try)))
+        lag_ok = FALSE
+        break
+      }
+    }
+    if (lag_ok) {
+      drivers_by_input = drivers_try
       break
     }
   }
