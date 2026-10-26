@@ -30,7 +30,7 @@ jobs:
           use-public-rspm: true
 
       - name: Install R packages
-        run: Rscript -e 'install.packages("jsonlite")'
+        run: Rscript -e 'install.packages(c("jsonlite", "xgboost"))'
 
       - name: Run the forecast
         run: bash Rcode/Main/run_realtime.sh

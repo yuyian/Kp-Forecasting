@@ -57,6 +57,8 @@ VARX_Kp_realtime.html
 VARX_Kp_baseline.html
 VARX_Kp_realtime_latest.csv
 VARX_Kp_realtime_27d.csv
+issued_forecast_3h.csv
+issued_forecast_daily.csv
 VARX_Kp_baseline_metrics.csv
 VARX_Kp_baseline_endpoint.csv
 VARX_Kp_baseline_27d_metrics.csv

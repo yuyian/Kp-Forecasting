@@ -10,10 +10,14 @@
 # -------------
 # RTSW Earth series (obs and model) from
 #   https://solarwind.engin.umich.edu/rtsw/api/series/?t=earth
-# Bins after that file come from one source, NOAA planetary Kp, rounded to
-# the nearest third. The GFZ nowcast is not mixed in. Training Kp is unchanged.
+# Bins after that file come from NOAA planetary Kp, rounded to the nearest
+# third. A bin NOAA no longer has is filled from the GFZ nowcast. Training
+# Kp is unchanged.
 #
-# The issued 24 h forecast is one VARX. In-situ and AWSoM share that model;
+# The issued forecast is the better model at each range. The next 24 hours are
+# the original vanilla XGBoost, loaded by Issue_Best.R. From 27 hours through
+# 27 days the issued value is the in-situ VARX below, rolled forward. F10.7 is
+# a separate daily ridge regression. In-situ and AWSoM still share one VARX;
 # only the solar-wind block changes. Besides the previous 24 hours, it uses
 # Kp and mean speed from one earlier window. The lag is chosen, per issue
 # and per input, from 25 to 29 days at 12 h steps, by how well speed over
@@ -242,6 +246,9 @@ obs_h = make_rtsw_hourly(obs_path)
 model_h = make_rtsw_hourly(model_path)
 # The lag match reads the same hourly series. Hold the last complete hour for
 # one Kp bin so a finished bin is not dropped when the feed is a few hours short.
+# A hole earlier in the series is filled inside the lag match, same rule as
+# the 24 h driver: interpolate when a later sample is already known, otherwise
+# leave it missing.
 hold_series_tail = function(h, hold_hr) {
   ok = apply(h$mat, 1, function(r) all(is.finite(r)))
   if (!any(ok) || hold_hr < 1L) return(h)
@@ -330,21 +337,69 @@ read_noaa_kp = function() {
   if (!length(ended)) return(NULL)
   data.frame(start = start[ended], kp = kp[ended], stringsAsFactors = FALSE)
 }
+read_gfz_kp = function() {
+  tmp = tempfile(fileext = ".txt")
+  on.exit(unlink(tmp), add = TRUE)
+  ok = tryCatch({
+    curl_to("https://kp.gfz.de/app/files/Kp_ap_Ap_SN_F107_nowcast.txt",
+            tmp, c("--ipv4", "-A", "Mozilla/5.0"))
+    TRUE
+  }, error = function(e) FALSE)
+  if (!ok) return(NULL)
+  lines = readLines(tmp, warn = FALSE)
+  lines = lines[!grepl("^\\s*#", lines) & nzchar(trimws(lines))]
+  if (!length(lines)) return(NULL)
+  nw = tryCatch(read.table(text = lines, stringsAsFactors = FALSE), error = function(e) NULL)
+  if (is.null(nw) || ncol(nw) < 15L) return(NULL)
+  hour_head = seq(0, 21, by = kp_step_hr)
+  start = rep(as.POSIXct(NA), nrow(nw) * length(hour_head))
+  kp = rep(NA_real_, length(start))
+  n = 0L
+  for (r in seq_len(nrow(nw))) {
+    for (k in seq_along(hour_head)) {
+      val = nw[r, 7L + k]
+      if (!is.finite(val) || val < 0 || val > 9) next
+      t0 = as.POSIXct(sprintf("%04d-%02d-%02d %02d:00:00",
+                              nw[r, 1], nw[r, 2], nw[r, 3], hour_head[k]),
+                      format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+      if (is.na(t0) || t0 + kp_step_hr * 3600 > Sys.time()) next
+      n = n + 1L
+      start[n] = t0
+      kp[n] = round(val * 3) / 3
+    }
+  }
+  if (!n) return(NULL)
+  data.frame(start = start[seq_len(n)], kp = kp[seq_len(n)], stringsAsFactors = FALSE)
+}
 refresh_noaa_tail = function() {
   noaa = read_noaa_kp()
-  if (is.null(noaa)) return(list(ok = FALSE, updated = 0L, added = 0L))
-  noaa = noaa[noaa$start > kp_file_end, , drop = FALSE]
-  if (!nrow(noaa)) return(list(ok = TRUE, updated = 0L, added = 0L))
+  gfz = read_gfz_kp()
+  if (is.null(noaa) && is.null(gfz))
+    return(list(ok = FALSE, updated = 0L, added = 0L, from_gfz = 0L))
+  last_set = c(
+    if (!is.null(noaa) && nrow(noaa)) as.numeric(max(noaa$start)),
+    if (!is.null(gfz) && nrow(gfz)) as.numeric(max(gfz$start))
+  )
+  last_set = last_set[is.finite(last_set) & last_set > as.numeric(kp_file_end)]
+  if (!length(last_set))
+    return(list(ok = TRUE, updated = 0L, added = 0L, from_gfz = 0L))
   updated = 0L
   added = 0L
+  from_gfz = 0L
   step = kp_step_hr * 3600
   t = kp_file_end + step
-  last = max(noaa$start)
-  # NOAA keeps only a short recent window, so the first bin can be more than
-  # one step after the file. Keep the 3-hour grid and leave the hole missing.
-  while (as.numeric(t) <= as.numeric(last) + 1) {
-    j = match(as.numeric(t), as.numeric(noaa$start))
-    val = if (is.na(j)) NA_real_ else noaa$kp[j]
+  last = max(last_set)
+  while (as.numeric(t) <= last + 1) {
+    jn = if (is.null(noaa)) NA_integer_ else match(as.numeric(t), as.numeric(noaa$start))
+    jg = if (is.null(gfz)) NA_integer_ else match(as.numeric(t), as.numeric(gfz$start))
+    val = NA_real_
+    used_gfz = FALSE
+    if (!is.na(jn)) {
+      val = noaa$kp[jn]
+    } else if (!is.na(jg)) {
+      val = gfz$kp[jg]
+      used_gfz = TRUE
+    }
     k = match(as.numeric(t), as.numeric(kp_time_live))
     if (!is.na(k)) {
       if (is.finite(val) && !isTRUE(all.equal(kp_value_live[k], val))) {
@@ -356,9 +411,10 @@ refresh_noaa_tail = function() {
       kp_value_live <<- c(kp_value_live, val)
       added = added + 1L
     }
+    if (used_gfz && is.finite(val)) from_gfz = from_gfz + 1L
     t = t + step
   }
-  list(ok = TRUE, updated = updated, added = added)
+  list(ok = TRUE, updated = updated, added = added, from_gfz = from_gfz)
 }
 kp_time_live = kp_time
 kp_value_live = kp_value
@@ -369,9 +425,12 @@ noaa_tail = refresh_noaa_tail()
 if (isTRUE(noaa_tail$ok)) {
   last_i = length(kp_time_live)
   kp_extend_source = "NOAA"
+  fill_note = ""
+  if (noaa_tail$from_gfz > 0L)
+    fill_note = sprintf(" %d bins missing from NOAA were filled from the GFZ nowcast.", noaa_tail$from_gfz)
   nowcast_note = sprintf(
-    "Kp source is NOAA planetary Kp. Refreshed %d bins after %s and appended %d, rounded to the nearest third. Latest ended bin %s to %s, Kp %.3f. Training Kp is unchanged.",
-    noaa_tail$updated, fmt_utc(kp_file_end), noaa_tail$added,
+    "Kp source is NOAA planetary Kp. Refreshed %d bins after %s and appended %d, rounded to the nearest third.%s Latest ended bin %s to %s, Kp %.3f. Training Kp is unchanged.",
+    noaa_tail$updated, fmt_utc(kp_file_end), noaa_tail$added, fill_note,
     fmt_utc(kp_time_live[last_i]),
     fmt_utc(kp_time_live[last_i] + kp_step_hr * 3600),
     kp_value_live[last_i])
@@ -487,10 +546,26 @@ recur_batch = function(tau, i_kp, kp_src, kp_hist_mat, exog,
   n = length(tau)
   stopifnot(nrow(kp_hist_mat) == n, nrow(exog) == n)
   stopifnot(ncol(exog) == history_hr * length(omni_features))
-  recent = pull_hours(hours_ending(tau, match_hr), speed_time, speed_vs, speed_latest)
+  # A short hole in speed is filled the same way as the 24 h driver. Hours
+  # after speed_latest stay missing, so a sample that has not ended is not used.
+  pull_speed = function(hour_num, grid, values, latest) {
+    filled = causal_solar_wind(hour_num, grid, matrix(values, ncol = 1), kp_step_hr)
+    if (is.null(dim(hour_num))) {
+      out = matrix(filled, nrow = 1)
+    } else {
+      out = matrix(filled, nrow = nrow(hour_num), ncol = ncol(hour_num))
+    }
+    if (!is.null(latest)) {
+      bad = matrix(as.vector(hour_num) > as.numeric(latest),
+                   nrow = nrow(out), ncol = ncol(out))
+      out[bad] = NA_real_
+    }
+    out
+  }
+  recent = pull_speed(hours_ending(tau, match_hr), speed_time, speed_vs, speed_latest)
   cors = matrix(NA_real_, n, length(lags_hr))
   for (j in seq_along(lags_hr)) {
-    past = pull_hours(hours_ending(tau - lags_hr[j] * 3600, match_hr),
+    past = pull_speed(hours_ending(tau - lags_hr[j] * 3600, match_hr),
                       speed_time, speed_vs, speed_latest)
     okj = finite_rows(recent) & finite_rows(past)
     if (any(okj))
@@ -510,7 +585,7 @@ recur_batch = function(tau, i_kp, kp_src, kp_hist_mat, exog,
     good = ix >= 1L & ix <= length(kp_src)
     rkp[good, j] = kp_src[ix[good]]
   }
-  raw_vs = pull_hours(hours_ending(tau - best_lag * 3600, history_hr),
+  raw_vs = pull_speed(hours_ending(tau - best_lag * 3600, history_hr),
                       vs_time, vs_values, speed_latest)
   rvs = rowMeans(raw_vs)
   if (!is.null(scale_vs)) rvs = scale_vs[, 1] + scale_vs[, 2] * rvs
@@ -1158,8 +1233,23 @@ while (i_live >= n_kp_hist) {
     all(abs(diff(as.numeric(kp_time_live[hist_ix])) - kp_step_hr * 3600) < 1)
   built = if (!hist_ok) NULL else lapply(inputs, function(input) build_driver(i_live, input))
   if (!is.null(built) && !any(vapply(built, is.null, logical(1)))) {
-    drivers_by_input = setNames(built, inputs)
-    break
+    tau_try = built[[1]]$tau
+    kp_try = matrix(kp_value_live[hist_ix], nrow = 1)
+    ex_obs = matrix(as.vector(built[[1]]$used), nrow = 1)
+    ex_model = matrix(as.vector(built[[2]]$used), nrow = 1)
+    ab_try = affine_updated(tau_try - history_hr * 3600)
+    ok_obs = isTRUE(recur_batch(tau_try, i_live, kp_value_live, kp_try, ex_obs,
+                                obs_h$time, obs_h$mat[, vs_col],
+                                obs_h$time, obs_h$mat[, vs_col],
+                                speed_latest = last_obs)$ok)
+    ok_model = isTRUE(recur_batch(tau_try, i_live, kp_value_live, kp_try, ex_model,
+                                  model_h$time, model_h$mat[, vs_col],
+                                  model_h$time, model_h$mat[, vs_col],
+                                  scale_vs = matrix(c(ab_try$a[vs_col], ab_try$b[vs_col]), nrow = 1))$ok)
+    if (ok_obs && ok_model) {
+      drivers_by_input = setNames(built, inputs)
+      break
+    }
   }
   i_live = i_live - 1L
 }
@@ -1172,6 +1262,7 @@ tau_live = drivers_by_input[[1]]$tau
 forecast_rows = list()
 driver_rows = list()
 recur_lag = list()
+xgb_X = NULL
 leads = seq(kp_step_hr, 24L, by = kp_step_hr)
 for (input in inputs) {
   driver = drivers_by_input[[input]]
@@ -1191,6 +1282,7 @@ for (input in inputs) {
   }
   if (!isTRUE(rb$ok))
     stop("Lag features are incomplete for ", input, " at ", fmt_utc(tau_live))
+  if (input == "Earth_obs") xgb_X = rb$pred
   yhat = as.numeric(recur_predict(rb$pred))
   one = function(x) unname(rep(as.vector(x), length(leads)))
   forecast_rows[[length(forecast_rows) + 1L]] = data.frame(
@@ -1248,20 +1340,40 @@ roll_outlook = function(y0, past_time, past_mat, transform) {
     omni_origin, live_cycle$best_end + hnum[fut] - as.numeric(tau_live), nrow(omni_use))
   ok_om = !is.na(ix_om)
   if (any(ok_om)) sw[which(fut)[ok_om], ] = omni_use[ix_om[ok_om], , drop = FALSE]
+  # A short hole in the working wind table is filled from the hours on either
+  # side. The hours after the issue are the chosen OMNI cycle, already known.
+  filled = causal_solar_wind(hnum, hnum, sw, kp_step_hr)
+  sw = matrix(filled, nrow = length(hnum), ncol = ncol(sw))
+  colnames(sw) = omni_features
   kp_work = c(kp_value_live[(i_live - kp_back + 1L):i_live], y)
   for (day in 1:(outlook_days - 1L)) {
     i_now = kp_back + day * 8L
     tau_d = tau_live + day * 24 * 3600
     hour_start = as.numeric(tau_d) - (history_hr:1L) * 3600
     ixh = match(hour_start, hnum)
-    if (anyNA(ixh)) break
+    if (anyNA(ixh)) {
+      cat(sprintf("27-day roll stopped on day %d: a driver hour is outside the wind table.\n", day + 1L))
+      break
+    }
     block = sw[ixh, , drop = FALSE]
-    if (!all(is.finite(block))) break
+    if (!all(is.finite(block))) {
+      cat(sprintf("27-day roll stopped on day %d: %d driver values are missing.\n",
+                  day + 1L, sum(!is.finite(block))))
+      break
+    }
     rb = recur_batch(tau_d, i_now, kp_work,
                      matrix(kp_work[(i_now - n_kp_hist + 1L):i_now], nrow = 1),
                      matrix(as.vector(block), nrow = 1),
                      hnum, sw[, vs_col], hnum, sw[, vs_col])
-    if (!isTRUE(rb$ok)) break
+    if (!isTRUE(rb$ok)) {
+      # Speed match is usable, but no earlier Kp window has the same shape,
+      # so there is no rise or fall to add. Continue with that growth at zero.
+      if (!all(is.finite(rb$pred[, seq_len(138), drop = FALSE]))) {
+        cat(sprintf("27-day roll stopped on day %d: the solar-rotation match is incomplete.\n", day + 1L))
+        break
+      }
+      rb$pred[, 139:146] = 0
+    }
     yhat = as.numeric(recur_predict(rb$pred))
     if (!all(is.finite(yhat))) break
     slots = day * 8L + seq_len(8L)
@@ -1298,6 +1410,7 @@ cat(sprintf("27-day roll  in-situ %d/216  AWSoM %d/216  matched cycle %s\n",
             else "none"))
 
 source(file.path(repo_root, "Rcode", "Main", "Write_VARX_Pages.R"))
+source(file.path(repo_root, "Rcode", "Main", "Issue_Best.R"))
 
 score_baseline = function() {
   cal_end = train_end + cal_days * 86400
@@ -1618,12 +1731,38 @@ cat(sprintf("Appended %s\n", log_path))
 
 cat("\nScoring baseline where the 24 h target Kp has already been observed\n")
 base = score_baseline()
+f107_path = file.path(repo_root, "Data", "Origin", "F107", "SW-All.txt")
+dir.create(dirname(f107_path), recursive = TRUE, showWarnings = FALSE)
+f107_tmp = tempfile(fileext = ".txt")
+f107_ok = tryCatch({
+  curl_to("https://celestrak.org/SpaceData/SW-All.txt", f107_tmp)
+  TRUE
+}, error = function(e) FALSE)
+if (isTRUE(f107_ok)) {
+  f107_head = readLines(f107_tmp, warn = FALSE, n = 40)
+  if (any(grepl("^BEGIN OBSERVED", f107_head))) {
+    file.copy(f107_tmp, f107_path, overwrite = TRUE)
+    cat("Updated F10.7 from CelesTrak SW-All.txt\n")
+  } else {
+    cat("CelesTrak download was not SW-All.txt. Keeping the file already saved.\n")
+  }
+} else {
+  cat("F10.7 download failed. Keeping the file already saved.\n")
+}
+unlink(f107_tmp)
+issued = issue_best_forecast(repo_root, out_dir, xgb_X, outlook, tau_live)
+outlook = issued$outlook
 outlook_path = file.path(out_dir, "VARX_Kp_realtime_27d.csv")
 write.csv(outlook, outlook_path, row.names = FALSE)
 cat(sprintf("Wrote %s\n", outlook_path))
+f107_raw = load_f107_observed(file.path(repo_root, "Data", "Origin", "F107", "SW-All.txt"))
+f107_measured = data.frame(
+  date = f107_raw$date, f107_obs = f107_raw$obs, f107_adj = f107_raw$adj,
+  stringsAsFactors = FALSE)
+f107_measured = f107_measured[f107_raw$q %in% c(0L, 1L), ]
 write_realtime_page(page_path, forecast_live, drivers, kp_hist_time, kp_hist, tau_live, generated_at, ab_live,
                     recur_lag[["Earth_obs"]], recur_lag[["model_affine"]],
-                    outlook = outlook,
+                    outlook = outlook, f107 = issued$f107, f107_measured = f107_measured,
                     kp_obs_time = kp_chart_time, kp_obs_value = kp_chart_value,
                     kp_obs_source = kp_chart_source,
                     kp_history_note = if (identical(kp_extend_source, "NOAA")) nowcast_note else NULL)
@@ -1838,7 +1977,15 @@ write.csv(outlook_series, outlook_series_path, row.names = FALSE)
 baseline_page = file.path(out_dir, "VARX_Kp_baseline.html")
 baseline_metrics_path = file.path(out_dir, "VARX_Kp_baseline_metrics.csv")
 baseline_endpoint_path = file.path(out_dir, "VARX_Kp_baseline_endpoint.csv")
-write_baseline_page(baseline_page, base, generated_at, outlook_eval = outlook_eval)
+xgb_pred_path = file.path(repo_root, "Rcode", "Main", "output",
+                           "surtai_vanilla_xgboost_allhorizons", "external_predictions.csv")
+issued_section = issued_quantity_baseline(
+  xgb = if (file.exists(xgb_pred_path)) read.csv(xgb_pred_path, stringsAsFactors = FALSE) else NULL,
+  roll = outlook_series,
+  flux = score_f107_recent(repo_root)
+)
+write_baseline_page(baseline_page, base, generated_at, outlook_eval = outlook_eval,
+                    issued_section = issued_section)
 write.csv(base$metrics, baseline_metrics_path, row.names = FALSE)
 write.csv(data.frame(
   issue_time = fmt_utc(base$tau),
