@@ -86,12 +86,15 @@ svg_runs = function(x, y, xmin, xmax, ymin, ymax, x0, x1, y0, y1, color, width,
   }, ""), collapse = "")
 }
 
-toggle_btns = function() paste0(
+toggle_btns = function(boost = FALSE) paste0(
   '<div class="togs">',
   '<button type="button" class="tog" data-series="insitu" aria-pressed="false">',
   '<i class="sw" style="background:#1d4ed8"></i>In-situ</button>',
   '<button type="button" class="tog" data-series="awsom" aria-pressed="false">',
   '<i class="sw" style="background:#c2410c"></i>AWSoM</button>',
+  if (boost) paste0(
+    '<button type="button" class="tog" data-series="boost" aria-pressed="false">',
+    '<i class="sw" style="background:#0e7490"></i>Boosted</button>') else "",
   '</div>'
 )
 
@@ -513,7 +516,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     oymin = 0
     y_line27 = if ("y_issued" %in% names(outlook) && all(is.finite(outlook$y_issued)))
       outlook$y_issued else outlook$y_boost
-    y_for_scale = c(outlook$y_insitu, outlook$y_awsom, y_line27, outlook$y_matched)
+    y_for_scale = c(outlook$y_insitu, outlook$y_awsom, y_line27, outlook$y_boost, outlook$y_matched)
     if (has_obs) y_for_scale = c(y_for_scale, kp_obs_value)
     oymax = max(y_for_scale, na.rm = TRUE)
     oymax = if (!is.finite(oymax) || oymax <= 4) 4 else 9
@@ -547,7 +550,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       '<svg viewBox="0 0 %d %d" role="img" aria-label="27 day Kp outlook">',
       ogrid, oylab, oxlab,
       '<text x="14" y="136" text-anchor="middle" font-size="12" fill="#57534e" transform="rotate(-90 14 136)">Kp</text>',
-      '%s%s%s%s%s',
+      '%s%s%s%s%s%s',
       '<text x="%g" y="292" font-size="12" fill="#57534e">Date (UTC)</text>',
       '</svg>'),
       W2, H2,
@@ -556,6 +559,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       line_of(outlook$y_matched, col_match, "1.8", opacity = 0.45),
       line_of(outlook$y_insitu, col_obs, "2.0", "opt insitu", 0.55),
       line_of(outlook$y_awsom, col_mod, "2.0", "opt awsom", 0.55),
+      line_of(outlook$y_boost, "#0e7490", "2.0", "opt boost", 0.8),
       ox0)
     kp_r = round(y_line27, 3)
     ap_r = ap_of(y_line27)
@@ -578,7 +582,8 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     }
     meas_ap = if (length(meas_t)) ap_of(meas_kp) else numeric()
     on_chart = if (length(meas_t)) meas_t >= oxmin & meas_t <= oxmax else logical()
-    ap_scale = c(ap_r, ap_of(outlook$y_insitu), ap_of(outlook$y_awsom), meas_ap)
+    ap_scale = c(ap_r, ap_of(outlook$y_insitu), ap_of(outlook$y_awsom),
+                 ap_of(outlook$y_boost), meas_ap)
     ap_ymax = max(ap_scale, na.rm = TRUE)
     ap_ticks = pretty(c(0, ap_ymax), n = 4)
     ap_ticks = ap_ticks[ap_ticks >= 0]
@@ -594,7 +599,9 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       list(x = x_day, y = ap_of(outlook$y_insitu), color = col_obs, width = "2.0",
            cls = "opt insitu", opacity = 0.55),
       list(x = x_day, y = ap_of(outlook$y_awsom), color = col_mod, width = "2.0",
-           cls = "opt awsom", opacity = 0.55)
+           cls = "opt awsom", opacity = 0.55),
+      list(x = x_day, y = ap_of(outlook$y_boost), color = "#0e7490", width = "2.0",
+           cls = "opt boost", opacity = 0.8)
     ))
     ap_svg = forecast_svg_chart(
       ap_series, oxmin, oxmax, 0, ap_ymax, ap_ticks,
@@ -618,19 +625,19 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     outlook_rows = paste(vapply(seq_len(nrow(outlook)), function(i) {
       key = sprintf("%.0f", as.numeric(parse_utc(outlook$day_end[i])))
       got = key %in% names(meas_kp_by_end)
-      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
               outlook$day[i], html_escape(outlook$day_end[i]),
               fmt_num(outlook$y_insitu[i], 3), fmt_num(outlook$y_awsom[i], 3),
-              fmt_num(y_line27[i], 3),
+              fmt_num(y_line27[i], 3), fmt_num(outlook$y_boost[i], 3),
               if (got) fmt_num(meas_kp_by_end[[key]], 3) else "",
               fmt_num(outlook$y_matched[i], 3))
     }, ""), collapse = "\n")
     ap_rows = paste(vapply(seq_len(nrow(outlook)), function(i) {
       key = sprintf("%.0f", as.numeric(parse_utc(outlook$day_end[i])))
       got = key %in% names(meas_kp_by_end)
-      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
               outlook$day[i], html_escape(outlook$day_end[i]),
-              fmt_num(ap_r[i], 2),
+              fmt_num(ap_r[i], 2), fmt_num(ap_of(outlook$y_boost[i]), 2),
               if (got) fmt_num(meas_ap_by_end[[key]], 2) else "",
               fmt_num(ap_of(outlook$y_insitu[i]), 2),
               fmt_num(ap_of(outlook$y_awsom[i]), 2))
@@ -688,24 +695,24 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
           '<p>Green is the issued forecast. The first 24 hours are the same XGBoost values as the 24-hour Kp view. ',
           'After that, each step is the in-situ regression moved forward one day at a time. ',
           'Later days use the solar wind that followed the closest aligned OMNI cycle, from 1995 through January 2026, and the predicted Kp becomes the next day&rsquo;s recent Kp. ',
-          'The buttons add In-situ and AWSoM for every step. Violet is the Kp that followed the closest cycle, for comparison.</p>')
+          'The buttons add In-situ, AWSoM, and Boosted for every step. Violet is the Kp that followed the closest cycle, for comparison.</p>')
       } else {
         paste0(
           '<p>Green is Boosted, the issued forecast. It is the 24-hour model stepped forward one day at a time. ',
           'The first day is that 24-hour forecast. Later days use the solar wind that followed the closest aligned OMNI cycle, from 1995 through January 2026, and the predicted Kp becomes the next day&rsquo;s recent Kp. ',
           'Boosted uses AWSoM only when the latest observed Kp is high enough that earlier storms at that lead favored the blend. Otherwise it stays on the in-situ forecast. ',
-          'The buttons add In-situ and AWSoM. Violet is the Kp that followed the closest cycle, for comparison.</p>')
+          'The buttons add In-situ, AWSoM, and Boosted. Violet is the Kp that followed the closest cycle, for comparison.</p>')
       },
       obs_note,
       '<figure>',
       legend_html(legend_items),
-      toggle_btns(),
+      toggle_btns(TRUE),
       outlook_svg,
       '</figure>',
       '<div class="wrap scroll"><table><thead><tr>',
       '<th>Day</th><th>Forecast time (UTC)</th><th>In-situ</th><th>AWSoM</th><th>',
       if (has_issued) "Issued" else "Boosted",
-      '</th><th>Measured Kp</th><th>Best matched cycle</th>',
+      '</th><th>Boosted</th><th>Measured Kp</th><th>Best matched cycle</th>',
       '</tr></thead><tbody>', outlook_rows, '</tbody></table></div>'
     )
     ap27_html = paste0(
@@ -713,18 +720,18 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       '<p>ap is the 3-hour planetary amplitude of the issued Kp, on the Bartels scale used by GFZ and NOAA. ',
       'Between scale points it is interpolated in log(ap). It is not a separate forecast model. ',
       issued_ap_note,
-      'Green is the ap of the issued Kp. The buttons add the ap of the in-situ and AWSoM Kp. ',
+      'Green is the ap of the issued Kp. The buttons add the ap of the in-situ, AWSoM, and boosted Kp. ',
       'The daily table gives the mean and the maximum of those 3-hour ap values whose period starts on that UT day, and the same two numbers for Kp.</p>',
       '<figure>',
       legend_html(ap_legend),
-      toggle_btns(),
+      toggle_btns(TRUE),
       ap_svg,
       '</figure>',
       '<div class="wrap"><table><thead><tr>',
       '<th>Date (UTC)</th><th>Bins</th><th>Ap mean</th><th>Ap max</th><th>Kp mean</th><th>Kp max</th>',
       '</tr></thead><tbody>', daily_rows, '</tbody></table></div>',
       '<div class="wrap scroll"><table><thead><tr>',
-      '<th>Day</th><th>Forecast time (UTC)</th><th>Issued ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
+      '<th>Day</th><th>Forecast time (UTC)</th><th>Issued ap</th><th>Boosted ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
       '</tr></thead><tbody>', ap_rows, '</tbody></table></div>'
     )
   }
@@ -1021,7 +1028,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     '</div>',
     '<p class="downloads">Download this forecast: ',
     '<a href="issued_forecast_3h.csv" download>3-hour Kp, ap, and F10.7</a> ',
-    '<a href="issued_forecast_daily.csv" download>daily values</a></p>',
+    '<a href="issued_forecast_27d.csv" download>next 27 days</a></p>',
     '<div class="togs metric-switch">',
     '<button type="button" class="tog metric-btn" data-metric="kp" aria-pressed="true">Kp</button>',
     '<button type="button" class="tog metric-btn" data-metric="ap" aria-pressed="false">ap</button>',
