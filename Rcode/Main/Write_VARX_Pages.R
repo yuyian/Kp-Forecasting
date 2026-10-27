@@ -1152,14 +1152,30 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
     '<div class="wrap"><table><thead><tr>',
     '<th>Lead</th><th>Input</th><th>n</th><th>RMSE</th><th>MAE</th><th>Correlation</th><th>Skill</th>',
     '</tr></thead><tbody>')
-  pair_chart = function(x, y_true, y_hat, ylab, aria, title) {
+  pair_chart = function(x, y_true, y_hat, ylab, aria, title,
+                        y_insitu = NULL, y_awsom = NULL) {
     ok = is.finite(x) & is.finite(y_true) & is.finite(y_hat)
     x = x[ok]; y_true = y_true[ok]; y_hat = y_hat[ok]
+    if (!is.null(y_insitu)) y_insitu = y_insitu[ok]
+    if (!is.null(y_awsom)) y_awsom = y_awsom[ok]
     if (length(x) < 2L) return("")
     recent = x >= max(x) - 14 * 86400
     if (sum(recent) < 2L) recent = rep(TRUE, length(x))
     x = x[recent]; y_true = y_true[recent]; y_hat = y_hat[recent]
-    ymax = max(c(y_true, y_hat), na.rm = TRUE)
+    if (!is.null(y_insitu)) y_insitu = y_insitu[recent]
+    if (!is.null(y_awsom)) y_awsom = y_awsom[recent]
+    extras = list()
+    if (!is.null(y_insitu) && any(is.finite(y_insitu))) {
+      extras = c(extras, list(list(
+        x = x, y = y_insitu, color = "#1d4ed8", width = "2.0",
+        cls = "opt insitu", opacity = 0.55)))
+    }
+    if (!is.null(y_awsom) && any(is.finite(y_awsom))) {
+      extras = c(extras, list(list(
+        x = x, y = y_awsom, color = "#c2410c", width = "2.0",
+        cls = "opt awsom", opacity = 0.55)))
+    }
+    ymax = max(c(y_true, y_hat, unlist(lapply(extras, function(s) s$y))), na.rm = TRUE)
     ymin = 0
     ticks = pretty(c(ymin, ymax), n = 4)
     ticks = ticks[ticks >= 0]
@@ -1175,11 +1191,12 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
         list(color = "#a8a29e", label = "Measured"),
         list(color = "#047857", label = "Issued")
       )),
+      if (length(extras)) toggle_btns() else "",
       forecast_svg_chart(
-        list(
+        c(list(
           list(x = x, y = y_true, color = "#a8a29e", width = "1.6"),
           list(x = x, y = y_hat, color = "#047857", width = "2.2")
-        ),
+        ), extras),
         min(x), max(x), ymin, ymax, ticks,
         as.numeric(xt), trimws(format(xt, "%b %e", tz = "UTC")),
         ylab, "Target time (UTC)", aria),
@@ -1206,25 +1223,44 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
         row_of(h, "Issued XGBoost", score_one(y, yhat, ref)),
         row_of(h, "Persistence", score_one(y, ref, ref)))
     }, ""), collapse = "")
+    ap_of_safe = function(v) {
+      if (is.null(v)) return(NULL)
+      out = rep(NA_real_, length(v))
+      okv = is.finite(v)
+      if (any(okv)) out[okv] = kp_to_ap(v[okv])
+      out
+    }
     y24 = kp_to_ap(xgb$y_true_24h)
     p24 = kp_to_ap(xgb$pred_24h)
     x24 = as.numeric(parse_utc(xgb$issue_time)) + 24 * 3600
     span = paste(html_escape(xgb$issue_time[1]), "through", html_escape(tail(xgb$issue_time, 1)))
+    ins24 = aws24 = NULL
+    if (!is.null(roll) && nrow(roll) && 24L %in% roll$lead_end_hr) {
+      roll24 = roll[roll$lead_end_hr == 24L, ]
+      ix = match(format(parse_utc(xgb$issue_time), "%Y-%m-%d %H:%M", tz = "UTC"),
+                 format(parse_utc(roll24$issue_time), "%Y-%m-%d %H:%M", tz = "UTC"))
+      ins24 = roll24$y_insitu[ix]
+      aws24 = roll24$y_awsom[ix]
+    }
     kp_parts = c(kp_parts, paste0(
       '<h2>Issued Kp, next 24 hours</h2>',
       '<p>These are the vanilla XGBoost models used for the first 24 hours of the issued forecast, scored where the target Kp had already been observed. ',
       'Skill is against repeating the Kp known at issue time. ', span, '. ',
-      'The chart is the bin that ends 24 hours after issue. Gray is Kp observed later. Green is the issued forecast.</p>',
+      'The chart is the bin that ends 24 hours after issue. Gray is Kp observed later. Green is the issued forecast. ',
+      'The buttons add In-situ and AWSoM at that same lead.</p>',
       head_row, kp_rows, '</tbody></table></div>',
       pair_chart(x24, xgb$y_true_24h, xgb$pred_24h, "Kp",
-                 "24 hour Kp versus measured Kp", "Issued Kp, 24 hours ahead")
+                 "24 hour Kp versus measured Kp", "Issued Kp, 24 hours ahead",
+                 y_insitu = ins24, y_awsom = aws24)
     ))
     ap_parts = c(ap_parts, paste0(
       '<h2>Issued ap, next 24 hours</h2>',
       '<p>ap is the Bartels amplitude of that Kp. The same issues are scored in ap. ', span, '. ',
-      'The chart is the bin that ends 24 hours after issue. Gray is the measured ap. Green is the issued forecast.</p>',
+      'The chart is the bin that ends 24 hours after issue. Gray is the measured ap. Green is the issued forecast. ',
+      'The buttons add the ap of the in-situ and AWSoM Kp.</p>',
       head_row, ap_rows, '</tbody></table></div>',
-      pair_chart(x24, y24, p24, "ap", "24 hour ap versus measured ap", "Issued ap, 24 hours ahead")
+      pair_chart(x24, y24, p24, "ap", "24 hour ap versus measured ap", "Issued ap, 24 hours ahead",
+                 y_insitu = ap_of_safe(ins24), y_awsom = ap_of_safe(aws24))
     ))
   }
   if (!is.null(roll) && nrow(roll)) {
@@ -1242,9 +1278,9 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
       yaw = sub$y_awsom
       ref = sub$y_matched
       paste0(
-        row_of(h, "Issued in-situ", score_one(y, yhat, ref)),
-        row_of(h, "Boosted", score_one(y, sub$y_boost, ref)),
-        row_of(h, "Issued AWSoM", score_one(y, yaw, ref)),
+        row_of(h, "In-situ", score_one(y, yhat, ref)),
+        row_of(h, "AWSoM", score_one(y, yaw, ref)),
+        row_of(h, "Issued boosted", score_one(y, sub$y_boost, ref)),
         row_of(h, "Best matched cycle", score_one(y, ref, ref)))
     }, ""), collapse = "")
     ap_rows = paste(vapply(leads, function(h) {
@@ -1254,9 +1290,9 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
       yaw = ap_keep(sub$y_awsom)
       ref = ap_keep(sub$y_matched)
       paste0(
-        row_of(h, "Issued in-situ", score_one(y, yhat, ref)),
-        row_of(h, "Boosted", score_one(y, ap_keep(sub$y_boost), ref)),
-        row_of(h, "Issued AWSoM", score_one(y, yaw, ref)),
+        row_of(h, "In-situ", score_one(y, yhat, ref)),
+        row_of(h, "AWSoM", score_one(y, yaw, ref)),
+        row_of(h, "Issued boosted", score_one(y, ap_keep(sub$y_boost), ref)),
         row_of(h, "Best matched cycle", score_one(y, ref, ref)))
     }, ""), collapse = "")
     sub = roll[roll$lead_end_hr == 648L, ]
@@ -1267,27 +1303,31 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
     kp_parts = c(kp_parts, paste0(
       '<h2>Issued Kp, after 24 hours</h2>',
       '<p>From 27 hours through 27 days the issued forecast is the in-situ regression stepped forward on the closest OMNI cycle. ',
-      'Boosted is that forecast mixed with AWSoM only when the latest observed Kp is high enough that earlier storms at that lead favored the blend. Otherwise it stays on the in-situ forecast. ',
-      'AWSoM is the same outlook with the AWSoM solar-wind block. Neither Boosted nor AWSoM is the issued forecast. ',
+      'AWSoM is the same outlook with the AWSoM solar-wind block. ',
+      'Issued boosted mixes the in-situ forecast with AWSoM only when the latest observed Kp is high enough that earlier storms at that lead favored the blend. Otherwise it stays on the in-situ forecast. ',
       'Skill is against the Kp that followed the closest cycle. Skill = 1 - RMSE / RMSE of that cycle. ',
       'Issues with both a forecast and a later Kp run ', roll_span, '. ',
-      'The chart is the bin that ends 27 days after issue. Gray is Kp observed later. Green is the issued forecast.</p>',
+      'The chart is the bin that ends 27 days after issue. Gray is Kp observed later. Green is the issued forecast. ',
+      'The buttons add In-situ and AWSoM.</p>',
       head_row, kp_rows, '</tbody></table></div>',
       if (!nrow(sub)) "" else pair_chart(
         as.numeric(parse_utc(sub$target_end)), sub$y_true, sub$y_insitu,
-        "Kp", "27 day Kp versus measured Kp", "Issued Kp, 27 days ahead")
+        "Kp", "27 day Kp versus measured Kp", "Issued Kp, 27 days ahead",
+        y_insitu = sub$y_insitu, y_awsom = sub$y_awsom)
     ))
     ap_parts = c(ap_parts, paste0(
       '<h2>Issued ap, after 24 hours</h2>',
       '<p>The same Kp series, converted to ap, for issues ', roll_span, '. ',
-      'Boosted and AWSoM are not the issued forecast. ',
+      'Issued boosted is the ap of that blended Kp. ',
       'Skill is against the ap of the Kp that followed the closest cycle. ',
-      'The chart is the bin that ends 27 days after issue. Gray is the ap of the Kp observed later. Green is the issued ap.</p>',
+      'The chart is the bin that ends 27 days after issue. Gray is the ap of the Kp observed later. Green is the issued ap. ',
+      'The buttons add the ap of the in-situ and AWSoM Kp.</p>',
       head_row, ap_rows, '</tbody></table></div>',
       if (!nrow(sub)) "" else pair_chart(
         as.numeric(parse_utc(sub$target_end)),
         ap_keep(sub$y_true), ap_keep(sub$y_insitu),
-        "ap", "27 day ap versus measured ap", "Issued ap, 27 days ahead")
+        "ap", "27 day ap versus measured ap", "Issued ap, 27 days ahead",
+        y_insitu = ap_keep(sub$y_insitu), y_awsom = ap_keep(sub$y_awsom))
     ))
   }
   if (!is.null(flux) && nrow(flux)) {
