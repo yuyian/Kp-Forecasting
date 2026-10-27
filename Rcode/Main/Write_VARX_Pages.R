@@ -516,7 +516,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     oymin = 0
     y_line27 = if ("y_issued" %in% names(outlook) && all(is.finite(outlook$y_issued)))
       outlook$y_issued else outlook$y_boost
-    y_for_scale = c(outlook$y_insitu, outlook$y_awsom, y_line27, outlook$y_boost, outlook$y_matched)
+    y_for_scale = c(outlook$y_insitu, outlook$y_awsom, y_line27, outlook$y_matched)
     if (has_obs) y_for_scale = c(y_for_scale, kp_obs_value)
     oymax = max(y_for_scale, na.rm = TRUE)
     oymax = if (!is.finite(oymax) || oymax <= 4) 4 else 9
@@ -550,7 +550,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       '<svg viewBox="0 0 %d %d" role="img" aria-label="27 day Kp outlook">',
       ogrid, oylab, oxlab,
       '<text x="14" y="136" text-anchor="middle" font-size="12" fill="#57534e" transform="rotate(-90 14 136)">Kp</text>',
-      '%s%s%s%s%s%s',
+      '%s%s%s%s%s',
       '<text x="%g" y="292" font-size="12" fill="#57534e">Date (UTC)</text>',
       '</svg>'),
       W2, H2,
@@ -559,7 +559,6 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       line_of(outlook$y_matched, col_match, "1.8", opacity = 0.45),
       line_of(outlook$y_insitu, col_obs, "2.0", "opt insitu", 0.55),
       line_of(outlook$y_awsom, col_mod, "2.0", "opt awsom", 0.55),
-      line_of(outlook$y_boost, "#0e7490", "2.0", "opt boost", 0.8),
       ox0)
     kp_r = round(y_line27, 3)
     ap_r = ap_of(y_line27)
@@ -582,8 +581,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     }
     meas_ap = if (length(meas_t)) ap_of(meas_kp) else numeric()
     on_chart = if (length(meas_t)) meas_t >= oxmin & meas_t <= oxmax else logical()
-    ap_scale = c(ap_r, ap_of(outlook$y_insitu), ap_of(outlook$y_awsom),
-                 ap_of(outlook$y_boost), meas_ap)
+    ap_scale = c(ap_r, ap_of(outlook$y_insitu), ap_of(outlook$y_awsom), meas_ap)
     ap_ymax = max(ap_scale, na.rm = TRUE)
     ap_ticks = pretty(c(0, ap_ymax), n = 4)
     ap_ticks = ap_ticks[ap_ticks >= 0]
@@ -599,9 +597,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       list(x = x_day, y = ap_of(outlook$y_insitu), color = col_obs, width = "2.0",
            cls = "opt insitu", opacity = 0.55),
       list(x = x_day, y = ap_of(outlook$y_awsom), color = col_mod, width = "2.0",
-           cls = "opt awsom", opacity = 0.55),
-      list(x = x_day, y = ap_of(outlook$y_boost), color = "#0e7490", width = "2.0",
-           cls = "opt boost", opacity = 0.8)
+           cls = "opt awsom", opacity = 0.55)
     ))
     ap_svg = forecast_svg_chart(
       ap_series, oxmin, oxmax, 0, ap_ymax, ap_ticks,
@@ -625,19 +621,19 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     outlook_rows = paste(vapply(seq_len(nrow(outlook)), function(i) {
       key = sprintf("%.0f", as.numeric(parse_utc(outlook$day_end[i])))
       got = key %in% names(meas_kp_by_end)
-      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
               outlook$day[i], html_escape(outlook$day_end[i]),
               fmt_num(outlook$y_insitu[i], 3), fmt_num(outlook$y_awsom[i], 3),
-              fmt_num(y_line27[i], 3), fmt_num(outlook$y_boost[i], 3),
+              fmt_num(y_line27[i], 3),
               if (got) fmt_num(meas_kp_by_end[[key]], 3) else "",
               fmt_num(outlook$y_matched[i], 3))
     }, ""), collapse = "\n")
     ap_rows = paste(vapply(seq_len(nrow(outlook)), function(i) {
       key = sprintf("%.0f", as.numeric(parse_utc(outlook$day_end[i])))
       got = key %in% names(meas_kp_by_end)
-      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+      sprintf("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
               outlook$day[i], html_escape(outlook$day_end[i]),
-              fmt_num(ap_r[i], 2), fmt_num(ap_of(outlook$y_boost[i]), 2),
+              fmt_num(ap_r[i], 2),
               if (got) fmt_num(meas_ap_by_end[[key]], 2) else "",
               fmt_num(ap_of(outlook$y_insitu[i]), 2),
               fmt_num(ap_of(outlook$y_awsom[i]), 2))
@@ -695,24 +691,24 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
           '<p>Green is the issued forecast. The first 24 hours are the same XGBoost values as the 24-hour Kp view. ',
           'After that, each step is the in-situ regression moved forward one day at a time. ',
           'Later days use the solar wind that followed the closest aligned OMNI cycle, from 1995 through January 2026, and the predicted Kp becomes the next day&rsquo;s recent Kp. ',
-          'The buttons add In-situ, AWSoM, and Boosted for every step. Violet is the Kp that followed the closest cycle, for comparison.</p>')
+          'The buttons add In-situ and AWSoM for every step. Violet is the Kp that followed the closest cycle, for comparison.</p>')
       } else {
         paste0(
           '<p>Green is Boosted, the issued forecast. It is the 24-hour model stepped forward one day at a time. ',
           'The first day is that 24-hour forecast. Later days use the solar wind that followed the closest aligned OMNI cycle, from 1995 through January 2026, and the predicted Kp becomes the next day&rsquo;s recent Kp. ',
           'Boosted uses AWSoM only when the latest observed Kp is high enough that earlier storms at that lead favored the blend. Otherwise it stays on the in-situ forecast. ',
-          'The buttons add In-situ, AWSoM, and Boosted. Violet is the Kp that followed the closest cycle, for comparison.</p>')
+          'The buttons add In-situ and AWSoM. Violet is the Kp that followed the closest cycle, for comparison.</p>')
       },
       obs_note,
       '<figure>',
       legend_html(legend_items),
-      toggle_btns(TRUE),
+      toggle_btns(),
       outlook_svg,
       '</figure>',
       '<div class="wrap scroll"><table><thead><tr>',
       '<th>Day</th><th>Forecast time (UTC)</th><th>In-situ</th><th>AWSoM</th><th>',
       if (has_issued) "Issued" else "Boosted",
-      '</th><th>Boosted</th><th>Measured Kp</th><th>Best matched cycle</th>',
+      '</th><th>Measured Kp</th><th>Best matched cycle</th>',
       '</tr></thead><tbody>', outlook_rows, '</tbody></table></div>'
     )
     ap27_html = paste0(
@@ -720,18 +716,18 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       '<p>ap is the 3-hour planetary amplitude of the issued Kp, on the Bartels scale used by GFZ and NOAA. ',
       'Between scale points it is interpolated in log(ap). It is not a separate forecast model. ',
       issued_ap_note,
-      'Green is the ap of the issued Kp. The buttons add the ap of the in-situ, AWSoM, and boosted Kp. ',
+      'Green is the ap of the issued Kp. The buttons add the ap of the in-situ and AWSoM Kp. ',
       'The daily table gives the mean and the maximum of those 3-hour ap values whose period starts on that UT day, and the same two numbers for Kp.</p>',
       '<figure>',
       legend_html(ap_legend),
-      toggle_btns(TRUE),
+      toggle_btns(),
       ap_svg,
       '</figure>',
       '<div class="wrap"><table><thead><tr>',
       '<th>Date (UTC)</th><th>Bins</th><th>Ap mean</th><th>Ap max</th><th>Kp mean</th><th>Kp max</th>',
       '</tr></thead><tbody>', daily_rows, '</tbody></table></div>',
       '<div class="wrap scroll"><table><thead><tr>',
-      '<th>Day</th><th>Forecast time (UTC)</th><th>Issued ap</th><th>Boosted ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
+      '<th>Day</th><th>Forecast time (UTC)</th><th>Issued ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
       '</tr></thead><tbody>', ap_rows, '</tbody></table></div>'
     )
   }
@@ -1156,14 +1152,14 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
     '<div class="wrap"><table><thead><tr>',
     '<th>Lead</th><th>Input</th><th>n</th><th>RMSE</th><th>MAE</th><th>Correlation</th><th>Skill</th>',
     '</tr></thead><tbody>')
-  pair_chart = function(x, y_true, y_hat, y_ref, ylab, aria) {
+  pair_chart = function(x, y_true, y_hat, ylab, aria, title) {
     ok = is.finite(x) & is.finite(y_true) & is.finite(y_hat)
-    x = x[ok]; y_true = y_true[ok]; y_hat = y_hat[ok]; y_ref = y_ref[ok]
+    x = x[ok]; y_true = y_true[ok]; y_hat = y_hat[ok]
     if (length(x) < 2L) return("")
     recent = x >= max(x) - 14 * 86400
     if (sum(recent) < 2L) recent = rep(TRUE, length(x))
-    x = x[recent]; y_true = y_true[recent]; y_hat = y_hat[recent]; y_ref = y_ref[recent]
-    ymax = max(c(y_true, y_hat, y_ref), na.rm = TRUE)
+    x = x[recent]; y_true = y_true[recent]; y_hat = y_hat[recent]
+    ymax = max(c(y_true, y_hat), na.rm = TRUE)
     ymin = 0
     ticks = pretty(c(ymin, ymax), n = 4)
     ticks = ticks[ticks >= 0]
@@ -1174,16 +1170,15 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
     xt = xt[as.numeric(xt) >= min(x) & as.numeric(xt) <= max(x)]
     paste0(
       '<figure>',
+      '<figcaption>', html_escape(title), '</figcaption>',
       legend_html(list(
         list(color = "#a8a29e", label = "Measured"),
-        list(color = "#047857", label = "Issued"),
-        list(color = "#6b7280", label = "Reference", dash = TRUE)
+        list(color = "#047857", label = "Issued")
       )),
       forecast_svg_chart(
         list(
           list(x = x, y = y_true, color = "#a8a29e", width = "1.6"),
-          list(x = x, y = y_hat, color = "#047857", width = "2.2"),
-          list(x = x, y = y_ref, color = "#6b7280", width = "1.4", dash = TRUE)
+          list(x = x, y = y_hat, color = "#047857", width = "2.2")
         ),
         min(x), max(x), ymin, ymax, ticks,
         as.numeric(xt), trimws(format(xt, "%b %e", tz = "UTC")),
@@ -1213,26 +1208,33 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
     }, ""), collapse = "")
     y24 = kp_to_ap(xgb$y_true_24h)
     p24 = kp_to_ap(xgb$pred_24h)
-    r24 = kp_to_ap(xgb$last_observed_Kp)
     x24 = as.numeric(parse_utc(xgb$issue_time)) + 24 * 3600
     span = paste(html_escape(xgb$issue_time[1]), "through", html_escape(tail(xgb$issue_time, 1)))
     kp_parts = c(kp_parts, paste0(
       '<h2>Issued Kp, next 24 hours</h2>',
       '<p>These are the vanilla XGBoost models used for the first 24 hours of the issued forecast, scored where the target Kp had already been observed. ',
-      'Skill is against repeating the Kp known at issue time. ', span, '.</p>',
-      head_row, kp_rows, '</tbody></table></div>'
+      'Skill is against repeating the Kp known at issue time. ', span, '. ',
+      'The chart is the bin that ends 24 hours after issue. Gray is Kp observed later. Green is the issued forecast.</p>',
+      head_row, kp_rows, '</tbody></table></div>',
+      pair_chart(x24, xgb$y_true_24h, xgb$pred_24h, "Kp",
+                 "24 hour Kp versus measured Kp", "Issued Kp, 24 hours ahead")
     ))
     ap_parts = c(ap_parts, paste0(
       '<h2>Issued ap, next 24 hours</h2>',
-      '<p>ap is the Bartels amplitude of that Kp. The same issues are scored in ap. ',
-      'Gray is the measured ap. Green is the issued forecast. The dashed line repeats the ap known at issue time. ',
-      span, '.</p>',
+      '<p>ap is the Bartels amplitude of that Kp. The same issues are scored in ap. ', span, '. ',
+      'The chart is the bin that ends 24 hours after issue. Gray is the measured ap. Green is the issued forecast.</p>',
       head_row, ap_rows, '</tbody></table></div>',
-      pair_chart(x24, y24, p24, r24, "ap", "24 hour ap versus measured ap")
+      pair_chart(x24, y24, p24, "ap", "24 hour ap versus measured ap", "Issued ap, 24 hours ahead")
     ))
   }
   if (!is.null(roll) && nrow(roll)) {
     leads = c(27L, 72L, 168L, 336L, 648L)
+    ap_keep = function(v) {
+      out = rep(NA_real_, length(v))
+      ok = is.finite(v)
+      if (any(ok)) out[ok] = kp_to_ap(v[ok])
+      out
+    }
     kp_rows = paste(vapply(leads, function(h) {
       sub = roll[roll$lead_end_hr == h, ]
       y = sub$y_true
@@ -1241,23 +1243,19 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
       ref = sub$y_matched
       paste0(
         row_of(h, "Issued in-situ", score_one(y, yhat, ref)),
+        row_of(h, "Boosted", score_one(y, sub$y_boost, ref)),
         row_of(h, "Issued AWSoM", score_one(y, yaw, ref)),
         row_of(h, "Best matched cycle", score_one(y, ref, ref)))
     }, ""), collapse = "")
     ap_rows = paste(vapply(leads, function(h) {
       sub = roll[roll$lead_end_hr == h, ]
-      ap_keep = function(v) {
-        out = rep(NA_real_, length(v))
-        ok = is.finite(v)
-        if (any(ok)) out[ok] = kp_to_ap(v[ok])
-        out
-      }
       y = ap_keep(sub$y_true)
       yhat = ap_keep(sub$y_insitu)
       yaw = ap_keep(sub$y_awsom)
       ref = ap_keep(sub$y_matched)
       paste0(
         row_of(h, "Issued in-situ", score_one(y, yhat, ref)),
+        row_of(h, "Boosted", score_one(y, ap_keep(sub$y_boost), ref)),
         row_of(h, "Issued AWSoM", score_one(y, yaw, ref)),
         row_of(h, "Best matched cycle", score_one(y, ref, ref)))
     }, ""), collapse = "")
@@ -1269,25 +1267,31 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
     kp_parts = c(kp_parts, paste0(
       '<h2>Issued Kp, after 24 hours</h2>',
       '<p>From 27 hours through 27 days the issued forecast is the in-situ regression stepped forward on the closest OMNI cycle. ',
-      'AWSoM is the same outlook with the AWSoM solar-wind block. It is not the issued forecast. ',
-      'The reference for both is the Kp that followed that cycle. Skill = 1 - RMSE / RMSE of that cycle. ',
-      'Issues with both a forecast and a later Kp run ', roll_span, '.</p>',
-      head_row, kp_rows, '</tbody></table></div>'
+      'Boosted is that forecast mixed with AWSoM only when the latest observed Kp is high enough that earlier storms at that lead favored the blend. Otherwise it stays on the in-situ forecast. ',
+      'AWSoM is the same outlook with the AWSoM solar-wind block. Neither Boosted nor AWSoM is the issued forecast. ',
+      'Skill is against the Kp that followed the closest cycle. Skill = 1 - RMSE / RMSE of that cycle. ',
+      'Issues with both a forecast and a later Kp run ', roll_span, '. ',
+      'The chart is the bin that ends 27 days after issue. Gray is Kp observed later. Green is the issued forecast.</p>',
+      head_row, kp_rows, '</tbody></table></div>',
+      if (!nrow(sub)) "" else pair_chart(
+        as.numeric(parse_utc(sub$target_end)), sub$y_true, sub$y_insitu,
+        "Kp", "27 day Kp versus measured Kp", "Issued Kp, 27 days ahead")
     ))
     ap_parts = c(ap_parts, paste0(
       '<h2>Issued ap, after 24 hours</h2>',
-      '<p>The same in-situ Kp, converted to ap, for issues ', roll_span, '. ',
-      'AWSoM is that outlook converted to ap. It is not the issued forecast. ',
-      'The reference is the ap of the Kp that followed the closest cycle. ',
-      'The chart is the bin that ends 27 days after issue. Gray is the ap of the Kp observed later.</p>',
+      '<p>The same Kp series, converted to ap, for issues ', roll_span, '. ',
+      'Boosted and AWSoM are not the issued forecast. ',
+      'Skill is against the ap of the Kp that followed the closest cycle. ',
+      'The chart is the bin that ends 27 days after issue. Gray is the ap of the Kp observed later. Green is the issued ap.</p>',
       head_row, ap_rows, '</tbody></table></div>',
       if (!nrow(sub)) "" else pair_chart(
         as.numeric(parse_utc(sub$target_end)),
-        kp_to_ap(sub$y_true), kp_to_ap(sub$y_insitu), kp_to_ap(sub$y_matched),
-        "ap", "27 day ap versus measured ap")
+        ap_keep(sub$y_true), ap_keep(sub$y_insitu),
+        "ap", "27 day ap versus measured ap", "Issued ap, 27 days ahead")
     ))
   }
   if (!is.null(flux) && nrow(flux)) {
+    trace = attr(flux, "trace")
     show_leads = c(1L, 3L, 7L, 14L, 27L)
     use = flux$model %in% c("persistence", "ridge") & flux$lead_day %in% show_leads
     shown = flux[use, ]
@@ -1307,15 +1311,29 @@ issued_quantity_baseline = function(xgb = NULL, roll = NULL, flux = NULL) {
       }, ""), collapse = "")
     }, ""), collapse = "")
     window = if (nrow(shown)) shown$split[1] else ""
+    flux_charts = ""
+    if (!is.null(trace) && nrow(trace)) {
+      flux_charts = paste(vapply(c(1L, 27L), function(h) {
+        one = trace[trace$lead_day == h, ]
+        if (!nrow(one)) return("")
+        pair_chart(
+          as.numeric(parse_utc(one$target_date)), one$y_true, one$y_hat,
+          "F10.7 (sfu)",
+          sprintf("%d day F10.7 versus measured flux", h),
+          sprintf("Issued F10.7, %d %s ahead", h, if (h == 1L) "day" else "days"))
+      }, ""), collapse = "")
+    }
     f107_html = paste0(
       '<p>The table scores the ridge from the note above, not the Kp XGBoost. ',
       'That ridge was chosen on 2019&ndash;2022, where it beat repeating the latest flux, repeating the flux from one rotation earlier, and a blend of those two. ',
       'The rows are that same ridge on every target day from ', html_escape(window),
       '. Coefficients are fit only on issues that ended before this window. ',
-      'Skill is against repeating the latest measured flux. The mean is the average of the daily RMSE values from lead 1 through lead 27.</p>',
+      'Skill is against repeating the latest measured flux. The mean is the average of the daily RMSE values from lead 1 through lead 27. ',
+      'Gray on the charts is the measured flux. Green is the issued ridge.</p>',
       '<div class="wrap"><table><thead><tr>',
       '<th>Period</th><th>Lead</th><th>Model</th><th>n</th><th>RMSE (sfu)</th><th>Skill</th>',
-      '</tr></thead><tbody>', flux_rows, mean_rows, '</tbody></table></div>'
+      '</tr></thead><tbody>', flux_rows, mean_rows, '</tbody></table></div>',
+      flux_charts
     )
   }
   list(

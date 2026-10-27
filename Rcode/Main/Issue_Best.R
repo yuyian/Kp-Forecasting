@@ -243,6 +243,7 @@ score_f107_recent = function(repo_root, from = as.Date("2026-01-01")) {
   fit_issues = usable[date[usable + 28L] < from]
   alphas = c(0.1, 1, 10, 100, 1000)
   rows = list()
+  trace = list()
   for (h in 1:28) {
     Xf = design(inner_fit, h)
     sc0 = scale_fit(Xf)
@@ -282,9 +283,16 @@ score_f107_recent = function(repo_root, from = as.Date("2026-01-01")) {
       lead_day = h, model = "persistence", n = length(y),
       RMSE = rp, skill_vs_persistence = 0,
       stringsAsFactors = FALSE)
+    if (h %in% c(1L, 27L)) {
+      trace[[length(trace) + 1L]] = data.frame(
+        target_date = format(date[idx + h]),
+        lead_day = h, y_true = y, y_hat = hat,
+        stringsAsFactors = FALSE)
+    }
   }
   tab = do.call(rbind, rows)
   rownames(tab) = NULL
+  attr(tab, "trace") = if (length(trace)) do.call(rbind, trace) else NULL
   tab
 }
 
@@ -473,31 +481,20 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107,
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   write.csv(three, file.path(out_dir, "issued_forecast_3h.csv"), row.names = FALSE, quote = FALSE)
   write.csv(daily, file.path(out_dir, "issued_forecast_daily.csv"), row.names = FALSE, quote = FALSE)
-  if (!all(c("y_issued", "y_boost", "y_insitu", "y_awsom", "y_matched", "day", "day_end") %in% names(outlook)))
-    stop("The 27-day outlook is missing issued or boosted values.")
+  if (!all(c("y_issued", "day", "day_end") %in% names(outlook)))
+    stop("The 27-day outlook is missing the issued forecast.")
   end27 = as.POSIXct(outlook$day_end, tz = "UTC")
   start27 = end27 - 3 * 3600
   lead27 = as.integer(round(as.numeric(difftime(end27, issue_time, units = "hours"))))
   issued_kp = round(outlook$y_issued, 3)
-  boosted_kp = round(outlook$y_boost, 3)
-  insitu_kp = round(outlook$y_insitu, 3)
-  awsom_kp = round(outlook$y_awsom, 3)
-  matched_kp = round(outlook$y_matched, 3)
   flux27 = match(as.Date(format(start27, "%Y-%m-%d", tz = "UTC")), f107$date)
   if (any(is.na(flux27))) stop("A 27-day bin has no F10.7 forecast.")
   twentyseven = data.frame(
     forecast_time_utc = format(end27, "%Y-%m-%d %H:%M", tz = "UTC"),
     day = outlook$day,
     lead_h = lead27,
-    issued_kp = sprintf("%.3f", issued_kp),
-    boosted_kp = sprintf("%.3f", boosted_kp),
-    insitu_kp = sprintf("%.3f", insitu_kp),
-    awsom_kp = sprintf("%.3f", awsom_kp),
-    matched_kp = sprintf("%.3f", matched_kp),
-    issued_ap = sprintf("%.2f", round(kp_to_ap(issued_kp), 2)),
-    boosted_ap = sprintf("%.2f", round(kp_to_ap(boosted_kp), 2)),
-    insitu_ap = sprintf("%.2f", round(kp_to_ap(insitu_kp), 2)),
-    awsom_ap = sprintf("%.2f", round(kp_to_ap(awsom_kp), 2)),
+    kp = sprintf("%.3f", issued_kp),
+    ap = sprintf("%.2f", round(kp_to_ap(issued_kp), 2)),
     f107_obs = sprintf("%.1f", f107$f107_obs[flux27]),
     f107_adj = sprintf("%.1f", f107$f107_adj[flux27]),
     stringsAsFactors = FALSE
