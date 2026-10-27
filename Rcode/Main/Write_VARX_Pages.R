@@ -703,7 +703,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       outlook_svg,
       '</figure>',
       '<div class="wrap scroll"><table><thead><tr>',
-      '<th>Day</th><th>Period ends (UTC)</th><th>In-situ</th><th>AWSoM</th><th>',
+      '<th>Day</th><th>Forecast time (UTC)</th><th>In-situ</th><th>AWSoM</th><th>',
       if (has_issued) "Issued" else "Boosted",
       '</th><th>Measured Kp</th><th>Best matched cycle</th>',
       '</tr></thead><tbody>', outlook_rows, '</tbody></table></div>'
@@ -724,7 +724,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       '<th>Date (UTC)</th><th>Bins</th><th>Ap</th><th>Kp mean</th><th>Kp max</th>',
       '</tr></thead><tbody>', daily_rows, '</tbody></table></div>',
       '<div class="wrap scroll"><table><thead><tr>',
-      '<th>Day</th><th>Period ends (UTC)</th><th>Issued ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
+      '<th>Day</th><th>Forecast time (UTC)</th><th>Issued ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
       '</tr></thead><tbody>', ap_rows, '</tbody></table></div>'
     )
   }
@@ -1070,7 +1070,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     forecast_svg,
     '</figure>',
     '<div class="wrap"><table><thead><tr>',
-    '<th>3-hour period ends (UTC)</th><th>Hours ahead</th><th>', issued_label, ' Kp</th>',
+    '<th>Forecast time (UTC)</th><th>Hours ahead</th><th>', issued_label, ' Kp</th>',
     '<th>Measured Kp</th><th>In-situ</th><th>AWSoM</th><th>Latest Kp</th>',
     '</tr></thead><tbody>', forecast_rows_html, '</tbody></table></div>'
     )),
@@ -1093,7 +1093,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       ap24_svg,
       '</figure>',
       '<div class="wrap"><table><thead><tr>',
-      '<th>3-hour period ends (UTC)</th><th>Hours ahead</th><th>', issued_label, ' ap</th>',
+      '<th>Forecast time (UTC)</th><th>Hours ahead</th><th>', issued_label, ' ap</th>',
       '<th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th><th>Latest ap</th>',
       '</tr></thead><tbody>', ap24_rows_html, '</tbody></table></div>'
     ), hidden = TRUE),

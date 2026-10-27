@@ -288,7 +288,152 @@ score_f107_recent = function(repo_root, from = as.Date("2026-01-01")) {
   tab
 }
 
-write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107) {
+write_submission_annex = function(repo_root, sub_dir, issue_time, xgb_X = NULL,
+                                    solar_wind = NULL, kp_time = NULL, kp_value = NULL) {
+  model_dir = file.path(repo_root, "Rcode", "Main", "output",
+                        "surtai_vanilla_xgboost_allhorizons", "models")
+  leads = seq(3L, 24L, by = 3L)
+  metas = lapply(leads, function(h) {
+    readRDS(file.path(model_dir, sprintf("vanilla_xgboost_%02dh_metadata.rds", h)))
+  })
+  feat = metas[[1]]$feature_names
+  if (any(vapply(metas, function(m) !identical(m$feature_names, feat), logical(1))))
+    stop("The eight XGBoost models do not share one feature list.")
+  xgb_rows = lapply(metas, function(m) {
+    p = m$selected_params
+    data.frame(
+      lead_end_hr = m$lead_end_hr,
+      objective = p$objective,
+      booster = p$booster,
+      tree_method = p$tree_method,
+      max_depth = p$max_depth,
+      eta = p$eta,
+      min_child_weight = p$min_child_weight,
+      subsample = p$subsample,
+      colsample_bytree = p$colsample_bytree,
+      rounds = m$selected_rounds,
+      training_cutoff_utc = format(m$historical_cutoff, "%Y-%m-%d %H:%M", tz = "UTC"),
+      training_rows = m$refit_rows,
+      stringsAsFactors = FALSE
+    )
+  })
+  write.csv(do.call(rbind, xgb_rows),
+            file.path(sub_dir, "parameters_xgboost.csv"),
+            row.names = FALSE, quote = FALSE)
+  write.csv(data.frame(position = seq_along(feat), feature = feat),
+            file.path(sub_dir, "xgboost_features.csv"),
+            row.names = FALSE, quote = FALSE)
+  if (!is.null(xgb_X)) {
+    x = as.numeric(xgb_X)
+    if (length(x) != length(feat)) stop("The issued XGBoost row does not have 146 inputs.")
+    write.csv(data.frame(position = seq_along(feat), feature = feat, value = x),
+              file.path(sub_dir, "xgboost_input_at_issue.csv"),
+              row.names = FALSE, quote = FALSE)
+  }
+  coef_path = file.path(repo_root, "Rcode", "Main", "output",
+                        "Main_VARX_Realtime", "VARX_Kp_coef.RData")
+  env = new.env()
+  load(coef_path, envir = env)
+  B = env$fit_recur$B
+  terms = c("intercept", feat)
+  if (ncol(B) != length(terms)) stop("The in-situ regression width does not match the feature list.")
+  varx = do.call(rbind, lapply(seq_len(nrow(B)), function(i) {
+    data.frame(lead_end_hr = leads[i], term = terms, coefficient = B[i, ],
+               stringsAsFactors = FALSE)
+  }))
+  write.csv(varx, file.path(sub_dir, "parameters_varx_insitu.csv"),
+            row.names = FALSE, quote = FALSE)
+  fit = readRDS(file.path(repo_root, "Rcode", "Main", "output",
+                          "Main_VARX_Realtime", "f107_fit.rds"))
+  ridge_names = c("flux", "flux_lag_1d", "flux_lag_2d", "flux_lag_6d",
+                  "recurrence", "delta_1d", "delta_27d", "trail_81d",
+                  "sin_target_doy", "cos_target_doy", "intercept")
+  ridge = do.call(rbind, lapply(seq_along(fit$beta), function(h) {
+    b = fit$beta[[h]]
+    center = c(fit$mu[[h]], NA_real_)
+    scale = c(fit$sd[[h]], NA_real_)
+    data.frame(lead_day = h, term = ridge_names, center = center, scale = scale,
+               coefficient = b, stringsAsFactors = FALSE)
+  }))
+  write.csv(ridge, file.path(sub_dir, "parameters_f107_ridge.csv"),
+            row.names = FALSE, quote = FALSE)
+  if (!is.null(kp_time) && !is.null(kp_value)) {
+    write.csv(data.frame(
+      bin_start_utc = format(kp_time, "%Y-%m-%d %H:%M", tz = "UTC"),
+      bin_end_utc = format(kp_time + 3 * 3600, "%Y-%m-%d %H:%M", tz = "UTC"),
+      kp = kp_value, stringsAsFactors = FALSE
+    ), file.path(sub_dir, "kp_input_at_issue.csv"), row.names = FALSE, quote = FALSE)
+  }
+  if (!is.null(solar_wind) && nrow(solar_wind)) {
+    wind = solar_wind
+    if ("input" %in% names(wind)) wind = wind[wind$input == "Earth_obs", ]
+    keep = intersect(c("hour_start", "n_native", "B", "Bz", "Vs", "Pd", "Pt"), names(wind))
+    write.csv(wind[, keep, drop = FALSE],
+              file.path(sub_dir, "solar_wind_input_at_issue.csv"),
+              row.names = FALSE, quote = FALSE)
+  }
+  raw = load_f107_observed(file.path(repo_root, "Data", "Origin", "F107", "SW-All.txt"))
+  origin = as.Date(format(issue_time, "%Y-%m-%d", tz = "UTC")) - 1
+  ix = which(raw$date == origin)
+  if (length(ix) == 1L && ix >= 81L) {
+    sl = (ix - 80L):ix
+    write.csv(data.frame(
+      date = format(raw$date[sl]),
+      f107_obs = raw$obs[sl],
+      f107_adj = raw$adj[sl],
+      stringsAsFactors = FALSE
+    ), file.path(sub_dir, "f107_input_at_issue.csv"), row.names = FALSE, quote = FALSE)
+  }
+  issue_s = format(issue_time, "%Y-%m-%d %H:%M", tz = "UTC")
+  writeLines(c(
+    "University of Michigan submission for the NASA CCMC Swift re-entry challenge.",
+    paste("Issued", issue_s, "UTC."),
+    "",
+    "This folder is an F10.7 and Kp forecast. ap is the Bartels amplitude of that Kp.",
+    "These series replace the predictive F10.7 and Kp/Ap supplied by CCMC.",
+    "They are not those provided drivers.",
+    "This folder has no thermosphere density.",
+    "This folder has no reentry time and no trajectory.",
+    "No ballistic coefficient and no initial state vector were used.",
+    "",
+    "Files",
+    "  UM_Kp_ap_forecast_*.csv       3-hour Kp, ap, and F10.7",
+    "  UM_Kp_ap_daily_*.csv          daily ap, Kp, and F10.7",
+    "  f107_forecast_*.csv           daily F10.7 from the ridge regression",
+    "  kp_input_at_issue.csv         eight Kp bins known at issue time",
+    "  solar_wind_input_at_issue.csv 24 hours of near-Earth solar wind known at issue time",
+    "  f107_input_at_issue.csv       last 81 measured flux days used by the ridge",
+    "  xgboost_input_at_issue.csv    the 146 numbers read by the 24-hour models, when saved",
+    "  xgboost_features.csv          names of those 146 inputs",
+    "  parameters_xgboost.csv        depth, learning rate, and rounds for each lead",
+    "  parameters_varx_insitu.csv    in-situ regression used from 27 hours through 27 days",
+    "  parameters_f107_ridge.csv     ridge coefficients for each lead day",
+    "",
+    "The 24-hour Kp models read the eight Kp bins, 24 hours of measured |B|, Bz,",
+    "speed, proton density, and proton temperature, and a solar-rotation match",
+    "from 25 to 29 days earlier. AWSoM solar wind is not an input to the issued Kp.",
+    "From 27 hours through 27 days, Kp is the in-situ regression stepped forward",
+    "on the closest OMNI cycle. F10.7 is a separate ridge regression on the flux",
+    "history. Its penalty was chosen on 2015-2018 from 0.1, 1, 10, 100, and 1000,",
+    "and the stored coefficients are the ones applied. Forecast flux is kept at",
+    "or above 60 sfu. f107_adj multiplies that forecast by the historical median",
+    "ratio of adjusted to observed flux for the target day of the year.",
+    "",
+    "What may be made public",
+    "The solar and geomagnetic numbers in this folder may be made public.",
+    "That includes the forecasts, the inputs at issue time, and the parameters.",
+    "",
+    "What is not submitted and should not be made public",
+    "Nothing outside this folder was uploaded. Please do not publish serialized",
+    "model files, the training archive, validation tables, or any contact address.",
+    "No thermosphere density and no reentry prediction are included."
+  ), file.path(sub_dir, "SUBMISSION.txt"))
+  invisible(sub_dir)
+}
+
+write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107,
+                                xgb_X = NULL, solar_wind = NULL,
+                                kp_time = NULL, kp_value = NULL) {
   if (!"y_issued" %in% names(outlook)) stop("The outlook has no issued column.")
   end = as.POSIXct(outlook$day_end, tz = "UTC")
   start = end - 3 * 3600
@@ -301,8 +446,7 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107) {
   issue_s = format(issue_time, "%Y-%m-%d %H:%M", tz = "UTC")
   three = data.frame(
     issue_time_utc = issue_s,
-    bin_start_utc = format(start, "%Y-%m-%d %H:%M", tz = "UTC"),
-    bin_end_utc = format(end, "%Y-%m-%d %H:%M", tz = "UTC"),
+    forecast_time_utc = format(end, "%Y-%m-%d %H:%M", tz = "UTC"),
     lead_h = lead,
     kp = sprintf("%.3f", kp),
     ap = sprintf("%.2f", ap),
@@ -357,12 +501,16 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107) {
     "",
     "ap is the 3-hour planetary amplitude for that kp, from the Bartels scale used by",
     "GFZ and NOAA. Between scale points, ap is interpolated in log(ap). The daily ap",
-    "is the mean of the 3-hour ap values whose bin starts on that UT day. The first",
-    "and last days have four bins because the forecast starts and ends at 12:00 UTC.",
+    "is the mean of the 3-hour ap values whose bin starts on that UT day.",
+    paste0("The first day, ", daily$date[1], ", has ", daily$n_bins[1],
+           if (daily$n_bins[1] == 1) " bin" else " bins",
+           " because the forecast starts at ", issue_s, " UTC. The last day, ",
+           daily$date[nrow(daily)], ", has ", daily$n_bins[nrow(daily)],
+           if (daily$n_bins[nrow(daily)] == 1) " bin." else " bins."),
     "",
-    "lead_h is the number of hours from the issue time to bin_end_utc. The first bin",
-    "starts at the issue time, so its lead_h is 3. Line the series up on bin_start_utc",
-    "and bin_end_utc.",
+    "forecast_time_utc is the end of the 3-hour period that Kp describes.",
+    "lead_h is the number of hours from the issue time to forecast_time_utc.",
+    "The first period ends 3 hours after the issue, so its lead_h is 3.",
     "",
     "F10.7 is the observed 10.7 cm flux. Penticton measures at 20:00 UT, so the flux",
     "on the issue date was not yet known at 12:00 UTC. Each lead day has its own ridge",
@@ -377,17 +525,28 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107) {
            ".")
   )
   writeLines(readme, file.path(day_dir, "README.txt"))
-  list(three = three, daily = daily, dir = day_dir)
+  sub_dir = file.path(repo_root, "swift_challenge", "submission")
+  dir.create(sub_dir, recursive = TRUE, showWarnings = FALSE)
+  old = list.files(sub_dir, full.names = TRUE)
+  if (length(old)) unlink(old)
+  file.copy(file.path(day_dir, paste0("UM_Kp_ap_forecast_", stamp, ".csv")), sub_dir)
+  file.copy(file.path(day_dir, paste0("UM_Kp_ap_daily_", stamp, ".csv")), sub_dir)
+  file.copy(file.path(day_dir, paste0("f107_forecast_", format(issue_time, "%Y%m%d", tz = "UTC"), ".csv")), sub_dir)
+  file.copy(file.path(day_dir, "README.txt"), sub_dir)
+  write_submission_annex(repo_root, sub_dir, issue_time, xgb_X, solar_wind, kp_time, kp_value)
+  list(three = three, daily = daily, dir = day_dir, submission = sub_dir)
 }
 
-issue_best_forecast = function(repo_root, out_dir, xgb_X, outlook, issue_time) {
+issue_best_forecast = function(repo_root, out_dir, xgb_X, outlook, issue_time,
+                               solar_wind = NULL, kp_time = NULL, kp_value = NULL) {
   y_xgb = predict_student_xgb(repo_root, xgb_X)
   if (length(y_xgb) != 8L) stop("The 24-hour XGBoost forecast must have eight values.")
   outlook$y_issued = outlook$y_insitu
   outlook$y_issued[seq_len(8L)] = y_xgb
   if (any(!is.finite(outlook$y_issued))) stop("The issued 27-day Kp forecast is incomplete.")
   f107 = forecast_f107(repo_root, issue_time)
-  wrote = write_issued_package(repo_root, out_dir, issue_time, outlook, f107)
+  wrote = write_issued_package(repo_root, out_dir, issue_time, outlook, f107,
+                                xgb_X, solar_wind, kp_time, kp_value)
   cat("Issued 24 h XGBoost:")
   cat(sprintf(" %.3f", y_xgb), "\n", sep = "")
   cat(sprintf("Issued package: %s\n", wrote$dir))
