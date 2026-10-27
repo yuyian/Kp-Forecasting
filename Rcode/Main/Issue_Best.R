@@ -459,7 +459,8 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107,
     data.frame(
       date = day[ix[1]],
       n_bins = length(ix),
-      ap = sprintf("%.2f", mean(ap[ix])),
+      ap_mean = sprintf("%.2f", mean(ap[ix])),
+      ap_max = sprintf("%.2f", max(ap[ix])),
       kp_mean = sprintf("%.3f", mean(kp[ix])),
       kp_max = sprintf("%.3f", max(kp[ix])),
       f107_obs = three$f107_obs[ix[1]],
@@ -484,7 +485,7 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107,
     model = "ridge", stringsAsFactors = FALSE
   ), file.path(day_dir, paste0("f107_forecast_", format(issue_time, "%Y%m%d", tz = "UTC"), ".csv")),
   row.names = FALSE, quote = FALSE)
-  hi = daily[order(-as.numeric(daily$ap)), ]
+  hi = daily[order(-as.numeric(daily$ap_mean)), ]
   readme = c(
     "University of Michigan Kp and F10.7 forecast for the NASA CCMC Swift re-entry challenge.",
     paste("Issued", issue_s, "UTC."),
@@ -521,7 +522,9 @@ write_issued_package = function(repo_root, out_dir, issue_time, outlook, f107,
     "file both flux columns repeat the value of the UT day on which the bin starts.",
     "",
     paste0("The highest daily Ap values are ",
-           paste(sprintf("%s (Ap %s, maximum Kp %s)", hi$date[1:2], hi$ap[1:2], hi$kp_max[1:2]), collapse = " and "),
+           paste(sprintf("%s (mean Ap %s, maximum Ap %s, maximum Kp %s)",
+                         hi$date[1:2], hi$ap_mean[1:2], hi$ap_max[1:2], hi$kp_max[1:2]),
+                 collapse = " and "),
            ".")
   )
   writeLines(readme, file.path(day_dir, "README.txt"))

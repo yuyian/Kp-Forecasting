@@ -604,9 +604,9 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     day_key = format(bin_start, "%Y-%m-%d", tz = "UTC")
     daily_rows = paste(vapply(unique(day_key), function(d) {
       ix = which(day_key == d)
-      sprintf("<tr><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>",
+      sprintf("<tr><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>",
               html_escape(d), length(ix),
-              fmt_num(mean(ap_r[ix]), 2),
+              fmt_num(mean(ap_r[ix]), 2), fmt_num(max(ap_r[ix]), 2),
               fmt_num(mean(kp_r[ix]), 3), fmt_num(max(kp_r[ix]), 3))
     }, ""), collapse = "\n")
     axis_xmin = oxmin
@@ -714,14 +714,14 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       'Between scale points it is interpolated in log(ap). It is not a separate forecast model. ',
       issued_ap_note,
       'Green is the ap of the issued Kp. The buttons add the ap of the in-situ and AWSoM Kp. ',
-      'The daily Ap is the mean of the 3-hour ap values whose period starts on that UT day.</p>',
+      'The daily table gives the mean and the maximum of those 3-hour ap values whose period starts on that UT day, and the same two numbers for Kp.</p>',
       '<figure>',
       legend_html(ap_legend),
       toggle_btns(),
       ap_svg,
       '</figure>',
       '<div class="wrap"><table><thead><tr>',
-      '<th>Date (UTC)</th><th>Bins</th><th>Ap</th><th>Kp mean</th><th>Kp max</th>',
+      '<th>Date (UTC)</th><th>Bins</th><th>Ap mean</th><th>Ap max</th><th>Kp mean</th><th>Kp max</th>',
       '</tr></thead><tbody>', daily_rows, '</tbody></table></div>',
       '<div class="wrap scroll"><table><thead><tr>',
       '<th>Day</th><th>Forecast time (UTC)</th><th>Issued ap</th><th>Measured ap</th><th>In-situ ap</th><th>AWSoM ap</th>',
