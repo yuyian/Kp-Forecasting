@@ -8,8 +8,10 @@
 #
 # What it grabs
 # -------------
-# RTSW Earth series (obs and model) from
+# RTSW Earth observations from
 #   https://solarwind.engin.umich.edu/rtsw/api/series/?t=earth
+# AWSoM at Earth from
+#   https://solarwind.engin.umich.edu/rtsw/data/sat_earth_realtime.sat
 # Bins after that file come from NOAA planetary Kp, rounded to the nearest
 # third. A bin NOAA no longer has is filled from the GFZ nowcast. A bin
 # neither source has is left missing. Training Kp is unchanged.
@@ -1769,7 +1771,9 @@ if (isTRUE(f107_ok)) {
   cat("F10.7 download failed. Keeping the file already saved.\n")
 }
 unlink(f107_tmp)
-issued = issue_best_forecast(repo_root, out_dir, xgb_X, outlook, tau_live)
+issued = issue_best_forecast(repo_root, out_dir, xgb_X, outlook, tau_live,
+                               solar_wind = drivers, kp_time = kp_hist_time,
+                               kp_value = kp_hist)
 outlook = issued$outlook
 outlook_path = file.path(out_dir, "VARX_Kp_realtime_27d.csv")
 write.csv(outlook, outlook_path, row.names = FALSE)
