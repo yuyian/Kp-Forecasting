@@ -792,8 +792,8 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
       sprintf('<line x1="%g" y1="%.1f" x2="%g" y2="%.1f" stroke="#e7e5e4"/>', cx0, yy, cx1, yy)
     }, ""), collapse = "")
     sw_legend = legend_html(list(
-      list(color = col_obs, label = "Measured near Earth"),
-      list(color = col_mod, label = "AWSoM model")
+      list(color = col_obs, label = "In-situ"),
+      list(color = col_mod, label = "AWSoM")
     ))
     sprintf(paste0(
       '<figure><figcaption>%s <span>(%s)</span></figcaption>',
@@ -1033,7 +1033,7 @@ write_realtime_page = function(path, forecast, drivers, kp_bin_start, kp_bin_val
     '</div>',
     '<div class="wind-block" hidden>',
     '<p>These charts are not a forecast. They are the solar wind during the 24 hours before the forecast was issued, and they are the solar-wind input to the 24-hour Kp chart. ',
-    'Blue is what was measured near Earth. Orange is the AWSoM model, adjusted so its usual level matches the long-term solar-wind record (',
+    'Blue is In-situ. Orange is AWSoM, adjusted so its usual level matches the long-term solar-wind record (',
     html_escape(fmt_utc(ab_live$start)), ' through ', html_escape(fmt_utc(ab_live$end)),
     '). The hours being forecast are not included. ',
     'The measured record for this forecast looks back ', fmt_num(lag_obs_hr / 24, 0),
